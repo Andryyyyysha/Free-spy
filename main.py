@@ -12,21 +12,37 @@ from html import escape
 from datetime import datetime, timezone, timedelta
 import pytz
 from contextlib import contextmanager
+from aiohttp import web
+
 
 
 config = configparser.ConfigParser()
 config.read("config.ini")
 
-TOKEN = config.get("settings", "TOKEN", fallback="YOUR_BOT_TOKEN_HERE")
-try:
-    USER_ID = config.getint("settings", "USER_ID")
-except (configparser.NoSectionError, configparser.NoOptionError, ValueError):
-    USER_ID = 0
+TOKEN = os.environ.get("BOT_TOKEN")
+if not TOKEN:
+    TOKEN = config.get("settings", "TOKEN", fallback="YOUR_BOT_TOKEN_HERE")
 
-TIMEZONE_NAME = config.get("settings", "TIMEZONE_NAME", fallback="Europe/Moscow")
+user_id_env = os.environ.get("USER_ID")
+if user_id_env:
+    try:
+        USER_ID = int(user_id_env)
+    except ValueError:
+        USER_ID = 0
+else:
+    try:
+        USER_ID = config.getint("settings", "USER_ID")
+    except (configparser.NoSectionError, configparser.NoOptionError, ValueError):
+        USER_ID = 0
+
+TIMEZONE_NAME = os.environ.get("TIMEZONE_NAME")
+if not TIMEZONE_NAME:
+    TIMEZONE_NAME = config.get("settings", "TIMEZONE_NAME", fallback="Europe/Moscow")
 timezone_local = pytz.timezone(TIMEZONE_NAME)
 
-DATABASE_URL = config.get("settings", "DATABASE_URL", fallback="")
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    DATABASE_URL = config.get("settings", "DATABASE_URL", fallback="")
 PLACEHOLDER = "%s" if DATABASE_URL else "?"
 
 DELETED_MESSAGE_FORMAT = (
@@ -477,7 +493,25 @@ async def business_message(message: types.Message):
         )
 
 
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"Web server started on port {port}")
+
+
 async def main() -> None:
+    # Start web server for Render keep-alive
+    asyncio.create_task(start_web_server())
+
     bot = Bot(token=TOKEN)
     dp = Dispatcher()
     dp.include_router(router)
