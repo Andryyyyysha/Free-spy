@@ -294,8 +294,50 @@ class ConnectionsDB:
             )
 
 
+class SystemStateDB:
+    storage_name = "system_state"
+
+    @staticmethod
+    def create_table():
+        with db_session() as conn:
+            cursor = conn.cursor()
+            if DATABASE_URL:
+                cursor.execute('''CREATE TABLE IF NOT EXISTS system_state
+                                  (key TEXT PRIMARY KEY, value TEXT)''')
+            else:
+                cursor.execute('''CREATE TABLE IF NOT EXISTS system_state
+                                  (key TEXT PRIMARY KEY, value TEXT)''')
+
+    @staticmethod
+    def get_value(key: str) -> Union[str, None]:
+        with db_session() as conn:
+            cursor = get_db_cursor(conn)
+            cursor.execute(
+                f"SELECT value FROM system_state WHERE key = {PLACEHOLDER}",
+                [key]
+            )
+            row = cursor.fetchone()
+            return row['value'] if row else None
+
+    @staticmethod
+    def set_value(key: str, value: str):
+        with db_session() as conn:
+            cursor = conn.cursor()
+            if DATABASE_URL:
+                cursor.execute(
+                    f"INSERT INTO system_state (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                    [key, value]
+                )
+            else:
+                cursor.execute(
+                    f"INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)",
+                    [key, value]
+                )
+
+
 Messagesx.create_db()
 ConnectionsDB.create_table()
+SystemStateDB.create_table()
 
 
 async def cleanup_old_messages():
@@ -307,6 +349,54 @@ async def cleanup_old_messages():
         cutoff_datetime = datetime.now(timezone.utc) - timedelta(days=30)
         cutoff_timestamp_iso = cutoff_datetime.isoformat()
         Messagesx.delete_old_messages(cutoff_timestamp_iso)
+
+
+BOT_VERSION = "1.1.0"
+CHANGELOG_TEXT = (
+    "📢 <b>Обновление бота (v1.1.0):</b>\n\n"
+    "• При изменении подписей к медиафайлам (фото, видео, ГС, кружки и др.) теперь присылается сам измененный файл.\n"
+    "• Очищены технические плейсхолдеры из логов.\n"
+    "• Для удаленных медиафайлов без подписи скрыт блок содержания.\n"
+    "• Добавлены автоматические уведомления о перезапуске сервера."
+)
+
+
+async def check_and_broadcast_changelog(bot: Bot):
+    # 1. Send startup notification to admin
+    if USER_ID > 0:
+        try:
+            await bot.send_message(USER_ID, "🤖 Бот успешно запущен/перезапущен!")
+        except Exception as e:
+            logger.warning(f"Failed to send startup notification to admin: {e}")
+
+    # 2. Check and broadcast changelog
+    try:
+        last_broadcasted = SystemStateDB.get_value("last_broadcasted_version")
+        if last_broadcasted != BOT_VERSION:
+            logger.info(f"Broadcasting changelog for version {BOT_VERSION}...")
+            
+            # Fetch all unique user IDs from connections table
+            with db_session() as conn:
+                cursor = get_db_cursor(conn)
+                cursor.execute("SELECT DISTINCT user_id FROM connections")
+                rows = cursor.fetchall()
+                user_ids = [row['user_id'] for row in rows]
+                
+            if user_ids:
+                success_count = 0
+                for uid in user_ids:
+                    try:
+                        await bot.send_message(uid, CHANGELOG_TEXT, parse_mode="html")
+                        success_count += 1
+                        await asyncio.sleep(0.05)
+                    except Exception as e:
+                        logger.warning(f"Failed to send changelog to {uid}: {e}")
+                logger.info(f"Changelog broadcasted to {success_count}/{len(user_ids)} users.")
+            
+            # Save that we have broadcasted this version
+            SystemStateDB.set_value("last_broadcasted_version", BOT_VERSION)
+    except Exception as e:
+        logger.error(f"Error during changelog check/broadcast: {e}")
 
 
 MEDIA_NAMES = {
@@ -666,6 +756,10 @@ async def main() -> None:
     asyncio.create_task(start_web_server())
 
     bot = Bot(token=TOKEN)
+    
+    # Run startup notification and changelog check in background
+    asyncio.create_task(check_and_broadcast_changelog(bot))
+
     dp = Dispatcher()
     dp.include_router(router)
     await bot.delete_webhook(drop_pending_updates=True)
