@@ -392,6 +392,69 @@ async def business_connection_handler(con: types.BusinessConnection):
         logger.info(f"Business connection removed: ID={con.id}, User Chat ID={con.user_chat_id}")
 
 
+@router.message(Command(commands=["broadcast", "sendall"]))
+async def broadcast_command(message: types.Message, bot: Bot):
+    if message.from_user.id != USER_ID:
+        return
+
+    # Check if this is a reply to a message
+    reply = message.reply_to_message
+
+    # Extract text if not a reply
+    broadcast_text = None
+    if not reply:
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2:
+            await message.answer(
+                "📢 <b>Рассылка объявлений:</b>\n\n"
+                "1. Отправьте команду <code>/broadcast Текст</code> (для обычного текста).\n"
+                "2. Или сделайте <b>Ответ (Reply)</b> на любое сообщение (картинку, видео, кружок, текст) с текстом <code>/broadcast</code>.",
+                parse_mode="html"
+            )
+            return
+        broadcast_text = args[1]
+
+    # Fetch all unique user IDs from connections table
+    with db_session() as conn:
+        cursor = get_db_cursor(conn)
+        cursor.execute("SELECT DISTINCT user_id FROM connections")
+        rows = cursor.fetchall()
+        user_ids = [row['user_id'] for row in rows]
+
+    if not user_ids:
+        await message.answer("В базе данных нет зарегистрированных пользователей для рассылки.")
+        return
+
+    status_msg = await message.answer(f"Начинаю рассылку для {len(user_ids)} пользователей...")
+
+    success_count = 0
+    fail_count = 0
+
+    for uid in user_ids:
+        try:
+            if reply:
+                # Copy the original message exactly as it is (media, formatting, etc.)
+                await bot.copy_message(
+                    chat_id=uid,
+                    from_chat_id=message.chat.id,
+                    message_id=reply.message_id
+                )
+            else:
+                await bot.send_message(uid, broadcast_text)
+            success_count += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.warning(f"Failed to send broadcast to {uid}: {e}")
+            fail_count += 1
+
+    await status_msg.edit_text(
+        f"📢 <b>Рассылка завершена!</b>\n\n"
+        f"✅ Успешно отправлено: <code>{success_count}</code>\n"
+        f"❌ Ошибок (заблокировали бота): <code>{fail_count}</code>",
+        parse_mode="html"
+    )
+
+
 @router.message(Command(commands=["start"]))
 async def start_command(message: types.Message):
     await message.answer("Free spy — бесплатная опенсурс замена Dialog spy bot. На стадии тестирования.\n\nИсходный код проекта доступен на <a href='https://github.com/Claxy-mod/Free-spy'>GitHub</a>.", parse_mode='html')
