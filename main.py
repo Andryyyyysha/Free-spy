@@ -633,7 +633,43 @@ async def broadcast_command(message: types.Message, bot: Bot):
 
 @router.message(Command(commands=["start"]))
 async def start_command(message: types.Message):
-    await message.answer("Free spy — бесплатная опенсурс замена Dialog spy bot. На стадии тестирования.\n\nИсходный код проекта доступен на <a href='https://github.com/Claxy-mod/Free-spy'>GitHub</a>.", parse_mode='html')
+    kb = [
+        [types.KeyboardButton(text="🛡️ Безопасность и хостинг")]
+    ]
+    keyboard = types.ReplyKeyboardMarkup(
+        keyboard=kb,
+        resize_keyboard=True,
+        input_field_placeholder="Выберите действие..."
+    )
+    await message.answer(
+        "Free spy — бесплатная опенсурс замена Dialog spy bot. На стадии тестирования.\n\n"
+        "Исходный код проекта доступен на <a href='https://github.com/Claxy-mod/Free-spy'>GitHub</a>.",
+        parse_mode='html',
+        reply_markup=keyboard
+    )
+
+
+@router.message(F.text == "🛡️ Безопасность и хостинг")
+async def security_info_handler(message: types.Message):
+    info_text = (
+        "🛡️ <b>Вопросы безопасности и конфиденциальности</b>\n\n"
+        "Мы заботимся о вашей приватности и предлагаем максимальную прозрачность:\n\n"
+        "1. <b>Сквозное шифрование данных:</b>\n"
+        "Все перехваченные сообщения шифруются на лету алгоритмом AES-128 (Fernet) перед сохранением в базу данных. "
+        "Ключ дешифрования хранится исключительно в переменных окружения работающего сервера. "
+        "Ни хостинг базы данных (Supabase), ни разработчики не могут прочесть ваши сообщения.\n\n"
+        "2. <b>Изоляция пользователей:</b>\n"
+        "Ваши сообщения доставляются строго на ваш аккаунт Telegram, привязавший бизнес-подключение. "
+        "Перехват чужих переписок другими пользователями физически невозможен.\n\n"
+        "3. <b>Не доверяете нашему серверу?</b>\n"
+        "Если вы не хотите доверять свои переписки нашему публичному серверу, вы можете развернуть "
+        "<b>собственную независимую копию бота абсолютно бесплатно</b> за 5 минут!\n\n"
+        "Код проекта полностью открыт (Open Source). Вы можете проверить каждую строчку кода, "
+        "настроить свой сервер и свою базу данных, чтобы иметь 100% контроля над данными.\n\n"
+        "💻 <b>Исходный код и инструкция по запуску:</b>\n"
+        "https://github.com/Claxy-mod/Free-spy"
+    )
+    await message.answer(info_text, parse_mode="html", disable_web_page_preview=True)
 
 
 @router.edited_business_message()
