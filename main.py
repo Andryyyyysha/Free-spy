@@ -780,9 +780,10 @@ def get_settings_keyboard(user_id: int) -> types.InlineKeyboardMarkup:
     # 2. Startup/restart notification toggle (for all users)
     startup_val = settings.get("notify_startup", 1)
     startup_icon = "🔔 Вкл" if startup_val == 1 else "🔕 Выкл"
+    label = "Запуск/перезапуск бота" if user_id == USER_ID else "Оповещения о работе бота"
     buttons.append([
         types.InlineKeyboardButton(
-            text=f"Запуск/перезапуск бота: {startup_icon}",
+            text=f"{label}: {startup_icon}",
             callback_data="toggle_notify_startup"
         )
     ])
