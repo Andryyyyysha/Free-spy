@@ -2,6 +2,12 @@ import configparser
 import importlib
 import os
 import sqlite3
+import gc
+import sys
+try:
+    import resource
+except ImportError:
+    resource = None
 from pydantic import BaseModel
 import asyncio
 from typing import Union
@@ -359,6 +365,34 @@ CHANGELOG_TEXT = (
     "• Для удаленных медиафайлов без подписи скрыт блок содержания.\n"
     "• Добавлены автоматические уведомления о перезапуске сервера."
 )
+
+
+async def monitor_memory():
+    while True:
+        await asyncio.sleep(300)  # Check every 5 minutes
+        if not resource:
+            continue
+        try:
+            usage_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            if sys.platform == "darwin":  # macOS (bytes)
+                usage_mb = usage_kb / 1024.0 / 1024.0
+            else:  # Linux (kilobytes)
+                usage_mb = usage_kb / 1024.0
+            
+            logger.info(f"Current memory usage: {usage_mb:.2f} MB")
+            
+            # If memory exceeds 150MB, run GC
+            if usage_mb > 150:
+                collected = gc.collect()
+                logger.info(f"Memory cleanup: current usage is {usage_mb:.2f} MB. gc.collect() cleared {collected} objects.")
+                
+            # If memory exceeds 400MB (Render free tier limit is 512MB), restart the bot
+            if usage_mb > 400:
+                logger.critical(f"Memory usage critical ({usage_mb:.2f} MB). Triggering self-restart.")
+                # Exit process. Render will restart it automatically
+                os._exit(1)
+        except Exception as e:
+            logger.error(f"Error during memory monitoring: {e}")
 
 
 async def update_last_active():
@@ -820,6 +854,9 @@ async def main() -> None:
     
     # Start updating active timestamp periodically
     asyncio.create_task(update_last_active())
+    
+    # Start memory monitoring task
+    asyncio.create_task(monitor_memory())
 
     dp = Dispatcher()
     dp.include_router(router)
