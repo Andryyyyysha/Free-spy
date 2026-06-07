@@ -13,11 +13,40 @@ from datetime import datetime, timezone, timedelta
 import pytz
 from contextlib import contextmanager
 from aiohttp import web
+from cryptography.fernet import Fernet
 
 
 
 config = configparser.ConfigParser()
 config.read("config.ini")
+
+# Encryption Key setup
+ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY")
+if not ENCRYPTION_KEY:
+    ENCRYPTION_KEY = config.get("settings", "ENCRYPTION_KEY", fallback="")
+
+# If key is missing, generate a temporary one (fallback)
+if not ENCRYPTION_KEY:
+    ENCRYPTION_KEY = Fernet.generate_key().decode()
+    logging.warning("ENCRYPTION_KEY is not set! Generated a temporary key for this session. Messages won't be readable after bot restarts.")
+
+cipher_suite = Fernet(ENCRYPTION_KEY.encode())
+
+
+def encrypt_text(text: str) -> str:
+    if not text:
+        return text
+    return cipher_suite.encrypt(text.encode()).decode()
+
+
+def decrypt_text(encrypted_text: str) -> str:
+    if not encrypted_text:
+        return encrypted_text
+    try:
+        return cipher_suite.decrypt(encrypted_text.encode()).decode()
+    except Exception as e:
+        logging.error(f"Failed to decrypt message: {e}")
+        return "[Зашифрованное сообщение - Ошибка дешифрования]"
 
 TOKEN = os.environ.get("BOT_TOKEN")
 if not TOKEN:
@@ -158,11 +187,12 @@ class Messagesx:
 
     @staticmethod
     def add(user_id: int, message_id: int, message_text: Union[str, None], timestamp: str, media_type: str = "text", file_id: Union[str, None] = None):
+        encrypted_text = encrypt_text(message_text) if message_text else None
         with db_session() as con:
             cursor = con.cursor()
             cursor.execute(
                 f"INSERT INTO messages (user_id, message_id, message_text, timestamp, media_type, file_id) VALUES ({PLACEHOLDER}, {PLACEHOLDER}, {PLACEHOLDER}, {PLACEHOLDER}, {PLACEHOLDER}, {PLACEHOLDER})",
-                [user_id, message_id, message_text, timestamp, media_type, file_id],
+                [user_id, message_id, encrypted_text, timestamp, media_type, file_id],
             )
 
 
@@ -174,12 +204,17 @@ class Messagesx:
             cursor.execute(sql, [user_id, message_id])
             response = cursor.fetchone()
             if response is not None:
-                response = MessageRecord(**dict(response))
+                response = dict(response)
+                if response.get("message_text"):
+                    response["message_text"] = decrypt_text(response["message_text"])
+                response = MessageRecord(**response)
             return response
 
 
     @staticmethod
     def update(user_id: int, message_id: int, **kwargs):
+        if "message_text" in kwargs and kwargs["message_text"]:
+            kwargs["message_text"] = encrypt_text(kwargs["message_text"])
         with db_session() as con:
             cursor = con.cursor()
             sql = f"UPDATE messages SET"
