@@ -326,7 +326,7 @@ async def business_connection_handler(con: types.BusinessConnection):
 
 @router.message(Command(commands=["start"]))
 async def start_command(message: types.Message):
-    await message.answer("Free spy - бесплатная опенсурс замена Dialog spy bot. На стадии тестирования.", parse_mode='html')
+    await message.answer("Free spy — бесплатная опенсурс замена Dialog spy bot. На стадии тестирования.\n\nИсходный код проекта доступен на <a href='https://github.com/Claxy-mod/Free-spy'>GitHub</a>.", parse_mode='html')
 
 
 @router.edited_business_message()
