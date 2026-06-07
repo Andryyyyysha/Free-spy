@@ -801,11 +801,19 @@ async def start_command(message: types.Message):
         resize_keyboard=True,
         input_field_placeholder="Выберите действие..."
     )
-    await message.answer(
+    start_text = (
         "Free spy — бесплатная опенсурс замена Dialog spy bot. На стадии тестирования.\n\n"
-        "Исходный код проекта доступен на <a href='https://github.com/Claxy-mod/Free-spy'>GitHub</a>.",
+        "<b>Возможности бота:</b>\n"
+        "• Моментально пришлет уведомление, если собеседник изменит или удалит сообщение (включая текст, медиа, кружки и ГС).\n"
+        "• Все данные шифруются (AES-128). Доступ к вашим перепискам есть только у вас.\n"
+        "• Настройка оповещений об обновлениях бота и статусе его работы.\n\n"
+        "Исходный код проекта доступен на <a href='https://github.com/Claxy-mod/Free-spy'>GitHub</a>."
+    )
+    await message.answer(
+        start_text,
         parse_mode='html',
-        reply_markup=keyboard
+        reply_markup=keyboard,
+        disable_web_page_preview=True
     )
 
 
