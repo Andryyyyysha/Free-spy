@@ -400,7 +400,9 @@ async def start_command(message: types.Message):
 @router.edited_business_message()
 async def edited_business_message(message: types.Message):
     if message.from_user and message.from_user.id == message.chat.id:
-        recipient_id = ConnectionsDB.get_user_id(message.business_connection_id) or USER_ID
+        recipient_id = ConnectionsDB.get_user_id(message.business_connection_id)
+        if not recipient_id:
+            return
         user_msg = Messagesx.get(user_id=message.from_user.id, message_id=message.message_id)
         if user_msg:
             message_timestamp = datetime.fromisoformat(user_msg.timestamp).astimezone(timezone_local)
@@ -425,7 +427,9 @@ async def deleted_business_messages(event: types.BusinessMessagesDeleted, bot: B
     user_id = event.chat.id
     user_fullname = event.chat.full_name
     username = event.chat.username
-    recipient_id = ConnectionsDB.get_user_id(event.business_connection_id) or USER_ID
+    recipient_id = ConnectionsDB.get_user_id(event.business_connection_id)
+    if not recipient_id:
+        return
     for msg_id in event.message_ids:
         user_msg = Messagesx.get(user_id=user_id, message_id=msg_id)
         if user_msg:
