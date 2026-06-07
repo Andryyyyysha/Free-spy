@@ -457,28 +457,51 @@ async def update_last_active():
 
 
 async def check_and_broadcast_changelog(bot: Bot):
-    # 1. Send startup notification to admin
+    # 1. Determine startup state (is_restart)
+    last_active_str = SystemStateDB.get_value("last_active_timestamp")
+    is_restart = False
+    if last_active_str:
+        try:
+            last_active_dt = datetime.fromisoformat(last_active_str)
+            now_utc = datetime.now(timezone.utc)
+            if now_utc - last_active_dt < timedelta(minutes=15):
+                is_restart = True
+        except Exception:
+            pass
+
+    # 2. Send startup notification to admin
     if USER_ID > 0:
         admin_settings = UserSettingsDB.get_settings(USER_ID)
         if admin_settings.get("notify_startup", 1) == 1:
             try:
-                last_active_str = SystemStateDB.get_value("last_active_timestamp")
-                is_restart = False
-                if last_active_str:
-                    try:
-                        last_active_dt = datetime.fromisoformat(last_active_str)
-                        now_utc = datetime.now(timezone.utc)
-                        if now_utc - last_active_dt < timedelta(minutes=15):
-                            is_restart = True
-                    except Exception:
-                        pass
-                
                 status_text = "перезапущен" if is_restart else "запущен"
                 await bot.send_message(USER_ID, f"🤖 Бот успешно {status_text}!")
             except Exception as e:
                 logger.warning(f"Failed to send startup notification to admin: {e}")
 
-    # 2. Check and broadcast changelog
+    # 3. If it was a cold start (downtime > 15 mins), notify regular users
+    if not is_restart:
+        logger.info("Cold start detected. Notifying users about bot recovery...")
+        # Fetch all unique user IDs from connections table
+        with db_session() as conn:
+            cursor = get_db_cursor(conn)
+            cursor.execute("SELECT DISTINCT user_id FROM connections")
+            rows = cursor.fetchall()
+            user_ids = [row['user_id'] for row in rows]
+            
+        if user_ids:
+            for uid in user_ids:
+                if uid == USER_ID:
+                    continue  # Admin already got the admin notification
+                user_settings = UserSettingsDB.get_settings(uid)
+                if user_settings.get("notify_startup", 1) == 1:
+                    try:
+                        await bot.send_message(uid, "🤖 Бот снова в сети и готов к работе после технического перерыва!")
+                        await asyncio.sleep(0.05)
+                    except Exception as e:
+                        logger.warning(f"Failed to send recovery notification to {uid}: {e}")
+
+    # 4. Check and broadcast changelog
     try:
         last_broadcasted = SystemStateDB.get_value("last_broadcasted_version")
         if last_broadcasted != BOT_VERSION:
@@ -751,21 +774,20 @@ def get_settings_keyboard(user_id: int) -> types.InlineKeyboardMarkup:
     updates_icon = "🔔 Вкл" if updates_val == 1 else "🔕 Выкл"
     buttons.append([
         types.InlineKeyboardButton(
-            text=f"Оповещения об обновах: {updates_icon}",
+            text=f"Оповещения об обновлениях: {updates_icon}",
             callback_data="toggle_notify_updates"
         )
     ])
     
-    # 2. Startup/restart notification toggle (only for admin)
-    if user_id == USER_ID:
-        startup_val = settings.get("notify_startup", 1)
-        startup_icon = "🔔 Вкл" if startup_val == 1 else "🔕 Выкл"
-        buttons.append([
-            types.InlineKeyboardButton(
-                text=f"Запуск/перезапуск бота: {startup_icon}",
-                callback_data="toggle_notify_startup"
-            )
-        ])
+    # 2. Startup/restart notification toggle (for all users)
+    startup_val = settings.get("notify_startup", 1)
+    startup_icon = "🔔 Вкл" if startup_val == 1 else "🔕 Выкл"
+    buttons.append([
+        types.InlineKeyboardButton(
+            text=f"Запуск/перезапуск бота: {startup_icon}",
+            callback_data="toggle_notify_startup"
+        )
+    ])
         
     return types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -805,7 +827,7 @@ async def toggle_notification_callback(callback_query: types.CallbackQuery):
         current_val = settings.get("notify_updates", 1)
         new_val = 0 if current_val == 1 else 1
         UserSettingsDB.set_setting(user_id, "notify_updates", new_val)
-    elif action == "toggle_notify_startup" and user_id == USER_ID:
+    elif action == "toggle_notify_startup":
         current_val = settings.get("notify_startup", 1)
         new_val = 0 if current_val == 1 else 1
         UserSettingsDB.set_setting(user_id, "notify_startup", new_val)
