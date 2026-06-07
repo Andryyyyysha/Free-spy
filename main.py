@@ -55,9 +55,9 @@ DELETED_MESSAGE_FORMAT = (
 EDITED_MESSAGE_FORMAT = (
     "📝 <b>Изменено {media_name} от {user_fullname_escaped}</b> (ID: <code>{user_id}</code>)\n"
     "⏰ <b>Время отправки:</b> {timestamp}\n\n"
-    "❌ <b>Было:</b>\n"
+    "<b>Было:</b>\n"
     "<blockquote>{old_text}</blockquote>\n\n"
-    "✅ <b>Стало:</b>\n"
+    "<b>Стало:</b>\n"
     "<blockquote>{new_text}</blockquote>"
 )
 
