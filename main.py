@@ -361,11 +361,33 @@ CHANGELOG_TEXT = (
 )
 
 
+async def update_last_active():
+    while True:
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            SystemStateDB.set_value("last_active_timestamp", now_iso)
+        except Exception as e:
+            logger.warning(f"Failed to update last active timestamp: {e}")
+        await asyncio.sleep(60)
+
+
 async def check_and_broadcast_changelog(bot: Bot):
     # 1. Send startup notification to admin
     if USER_ID > 0:
         try:
-            await bot.send_message(USER_ID, "🤖 Бот успешно запущен/перезапущен!")
+            last_active_str = SystemStateDB.get_value("last_active_timestamp")
+            is_restart = False
+            if last_active_str:
+                try:
+                    last_active_dt = datetime.fromisoformat(last_active_str)
+                    now_utc = datetime.now(timezone.utc)
+                    if now_utc - last_active_dt < timedelta(minutes=15):
+                        is_restart = True
+                except Exception:
+                    pass
+            
+            status_text = "перезапущен" if is_restart else "запущен"
+            await bot.send_message(USER_ID, f"🤖 Бот успешно {status_text}!")
         except Exception as e:
             logger.warning(f"Failed to send startup notification to admin: {e}")
 
@@ -795,6 +817,9 @@ async def main() -> None:
     
     # Run startup notification and changelog check in background
     asyncio.create_task(check_and_broadcast_changelog(bot))
+    
+    # Start updating active timestamp periodically
+    asyncio.create_task(update_last_active())
 
     dp = Dispatcher()
     dp.include_router(router)
