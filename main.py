@@ -341,9 +341,60 @@ class SystemStateDB:
                 )
 
 
+class UserSettingsDB:
+    storage_name = "user_settings"
+
+    @staticmethod
+    def create_table():
+        with db_session() as conn:
+            cursor = conn.cursor()
+            if DATABASE_URL:
+                cursor.execute('''CREATE TABLE IF NOT EXISTS user_settings
+                                  (user_id BIGINT PRIMARY KEY,
+                                   notify_updates INTEGER DEFAULT 1,
+                                   notify_startup INTEGER DEFAULT 1)''')
+            else:
+                cursor.execute('''CREATE TABLE IF NOT EXISTS user_settings
+                                  (user_id INTEGER PRIMARY KEY,
+                                   notify_updates INTEGER DEFAULT 1,
+                                   notify_startup INTEGER DEFAULT 1)''')
+
+    @staticmethod
+    def get_settings(user_id: int) -> dict:
+        with db_session() as conn:
+            cursor = get_db_cursor(conn)
+            cursor.execute(f"SELECT * FROM user_settings WHERE user_id = {PLACEHOLDER}", [user_id])
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+            else:
+                return {"user_id": user_id, "notify_updates": 1, "notify_startup": 1}
+
+    @staticmethod
+    def set_setting(user_id: int, key: str, value: int):
+        with db_session() as conn:
+            cursor = conn.cursor()
+            if DATABASE_URL:
+                cursor.execute(
+                    f"INSERT INTO user_settings (user_id, {key}) VALUES (%s, %s) "
+                    f"ON CONFLICT (user_id) DO UPDATE SET {key} = EXCLUDED.{key}",
+                    [user_id, value]
+                )
+            else:
+                cursor.execute(
+                    f"INSERT OR IGNORE INTO user_settings (user_id) VALUES (?)",
+                    [user_id]
+                )
+                cursor.execute(
+                    f"UPDATE user_settings SET {key} = ? WHERE user_id = ?",
+                    [value, user_id]
+                )
+
+
 Messagesx.create_db()
 ConnectionsDB.create_table()
 SystemStateDB.create_table()
+UserSettingsDB.create_table()
 
 
 async def cleanup_old_messages():
@@ -408,22 +459,24 @@ async def update_last_active():
 async def check_and_broadcast_changelog(bot: Bot):
     # 1. Send startup notification to admin
     if USER_ID > 0:
-        try:
-            last_active_str = SystemStateDB.get_value("last_active_timestamp")
-            is_restart = False
-            if last_active_str:
-                try:
-                    last_active_dt = datetime.fromisoformat(last_active_str)
-                    now_utc = datetime.now(timezone.utc)
-                    if now_utc - last_active_dt < timedelta(minutes=15):
-                        is_restart = True
-                except Exception:
-                    pass
-            
-            status_text = "перезапущен" if is_restart else "запущен"
-            await bot.send_message(USER_ID, f"🤖 Бот успешно {status_text}!")
-        except Exception as e:
-            logger.warning(f"Failed to send startup notification to admin: {e}")
+        admin_settings = UserSettingsDB.get_settings(USER_ID)
+        if admin_settings.get("notify_startup", 1) == 1:
+            try:
+                last_active_str = SystemStateDB.get_value("last_active_timestamp")
+                is_restart = False
+                if last_active_str:
+                    try:
+                        last_active_dt = datetime.fromisoformat(last_active_str)
+                        now_utc = datetime.now(timezone.utc)
+                        if now_utc - last_active_dt < timedelta(minutes=15):
+                            is_restart = True
+                    except Exception:
+                        pass
+                
+                status_text = "перезапущен" if is_restart else "запущен"
+                await bot.send_message(USER_ID, f"🤖 Бот успешно {status_text}!")
+            except Exception as e:
+                logger.warning(f"Failed to send startup notification to admin: {e}")
 
     # 2. Check and broadcast changelog
     try:
@@ -441,12 +494,14 @@ async def check_and_broadcast_changelog(bot: Bot):
             if user_ids:
                 success_count = 0
                 for uid in user_ids:
-                    try:
-                        await bot.send_message(uid, CHANGELOG_TEXT, parse_mode="html")
-                        success_count += 1
-                        await asyncio.sleep(0.05)
-                    except Exception as e:
-                        logger.warning(f"Failed to send changelog to {uid}: {e}")
+                    user_settings = UserSettingsDB.get_settings(uid)
+                    if user_settings.get("notify_updates", 1) == 1:
+                        try:
+                            await bot.send_message(uid, CHANGELOG_TEXT, parse_mode="html")
+                            success_count += 1
+                            await asyncio.sleep(0.05)
+                        except Exception as e:
+                            logger.warning(f"Failed to send changelog to {uid}: {e}")
                 logger.info(f"Changelog broadcasted to {success_count}/{len(user_ids)} users.")
             
             # Save that we have broadcasted this version
@@ -687,10 +742,38 @@ async def broadcast_command(message: types.Message, bot: Bot):
     )
 
 
+def get_settings_keyboard(user_id: int) -> types.InlineKeyboardMarkup:
+    settings = UserSettingsDB.get_settings(user_id)
+    buttons = []
+    
+    # 1. Updates notification toggle
+    updates_val = settings.get("notify_updates", 1)
+    updates_icon = "🔔 Вкл" if updates_val == 1 else "🔕 Выкл"
+    buttons.append([
+        types.InlineKeyboardButton(
+            text=f"Оповещения об обновах: {updates_icon}",
+            callback_data="toggle_notify_updates"
+        )
+    ])
+    
+    # 2. Startup/restart notification toggle (only for admin)
+    if user_id == USER_ID:
+        startup_val = settings.get("notify_startup", 1)
+        startup_icon = "🔔 Вкл" if startup_val == 1 else "🔕 Выкл"
+        buttons.append([
+            types.InlineKeyboardButton(
+                text=f"Запуск/перезапуск бота: {startup_icon}",
+                callback_data="toggle_notify_startup"
+            )
+        ])
+        
+    return types.InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 @router.message(Command(commands=["start"]))
 async def start_command(message: types.Message):
     kb = [
-        [types.KeyboardButton(text="🛡️ Безопасность и хостинг")]
+        [types.KeyboardButton(text="🛡️ Безопасность и хостинг"), types.KeyboardButton(text="⚙️ Настройки")]
     ]
     keyboard = types.ReplyKeyboardMarkup(
         keyboard=kb,
@@ -703,6 +786,37 @@ async def start_command(message: types.Message):
         parse_mode='html',
         reply_markup=keyboard
     )
+
+
+@router.message(F.text == "⚙️ Настройки")
+async def settings_menu_handler(message: types.Message):
+    keyboard = get_settings_keyboard(message.from_user.id)
+    await message.answer("⚙️ <b>Настройки оповещений</b>", parse_mode="html", reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("toggle_notify_"))
+async def toggle_notification_callback(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    action = callback_query.data
+    
+    settings = UserSettingsDB.get_settings(user_id)
+    
+    if action == "toggle_notify_updates":
+        current_val = settings.get("notify_updates", 1)
+        new_val = 0 if current_val == 1 else 1
+        UserSettingsDB.set_setting(user_id, "notify_updates", new_val)
+    elif action == "toggle_notify_startup" and user_id == USER_ID:
+        current_val = settings.get("notify_startup", 1)
+        new_val = 0 if current_val == 1 else 1
+        UserSettingsDB.set_setting(user_id, "notify_startup", new_val)
+        
+    # Edit message to update keyboard
+    keyboard = get_settings_keyboard(user_id)
+    try:
+        await callback_query.message.edit_reply_markup(reply_markup=keyboard)
+    except Exception:
+        pass
+    await callback_query.answer("Настройки обновлены!")
 
 
 @router.message(F.text == "🛡️ Безопасность и хостинг")
