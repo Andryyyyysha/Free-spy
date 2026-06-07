@@ -11,6 +11,7 @@ from aiogram.filters import Command
 from html import escape
 from datetime import datetime, timezone, timedelta
 import pytz
+from contextlib import contextmanager
 
 
 config = configparser.ConfigParser()
@@ -24,6 +25,9 @@ except (configparser.NoSectionError, configparser.NoOptionError, ValueError):
 
 TIMEZONE_NAME = config.get("settings", "TIMEZONE_NAME", fallback="Europe/Moscow")
 timezone_local = pytz.timezone(TIMEZONE_NAME)
+
+DATABASE_URL = config.get("settings", "DATABASE_URL", fallback="")
+PLACEHOLDER = "%s" if DATABASE_URL else "?"
 
 DELETED_MESSAGE_FORMAT = (
     "🗑 <b>Удалено {media_name} от {user_fullname_escaped}</b> (ID: <code>{user_id}</code>)\n"
@@ -56,8 +60,38 @@ def dict_factory(cursor, row) -> dict:
     return save_dict
 
 
+def get_db_connection():
+    if DATABASE_URL:
+        import psycopg2
+        return psycopg2.connect(DATABASE_URL)
+    else:
+        return sqlite3.connect("messages.db")
+
+
+def get_db_cursor(conn):
+    if DATABASE_URL:
+        from psycopg2.extras import RealDictCursor
+        return conn.cursor(cursor_factory=RealDictCursor)
+    else:
+        conn.row_factory = dict_factory
+        return conn.cursor()
+
+
+@contextmanager
+def db_session():
+    conn = get_db_connection()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def update_format(sql, parameters: dict) -> tuple[str, list]:
-    values = ", ".join([f"{item} = ?" for item in parameters])
+    values = ", ".join([f"{item} = {PLACEHOLDER}" for item in parameters])
     sql += f" {values}"
     return sql, list(parameters.values())
 
@@ -73,115 +107,133 @@ class MessageRecord(BaseModel):
 
 class Messagesx:
     storage_name = "messages"
-    PATH_DATABASE = "messages.db"
-
 
     @staticmethod
     def create_db():
-        with sqlite3.connect(Messagesx.PATH_DATABASE) as conn:
+        with db_session() as conn:
             cursor = conn.cursor()
-            cursor.execute('''CREATE TABLE IF NOT EXISTS messages
-                              (id INTEGER PRIMARY KEY,
-                               user_id INTEGER,
-                               message_id INTEGER,
-                               message_text TEXT,
-                               timestamp TEXT,
-                               media_type TEXT DEFAULT 'text',
-                               file_id TEXT)''')
-            # Migrate old database structure if it exists
+            if DATABASE_URL:
+                cursor.execute('''CREATE TABLE IF NOT EXISTS messages
+                                  (id SERIAL PRIMARY KEY,
+                                   user_id BIGINT,
+                                   message_id BIGINT,
+                                   message_text TEXT,
+                                   timestamp TEXT,
+                                   media_type TEXT DEFAULT 'text',
+                                   file_id TEXT)''')
+            else:
+                cursor.execute('''CREATE TABLE IF NOT EXISTS messages
+                                  (id INTEGER PRIMARY KEY,
+                                   user_id INTEGER,
+                                   message_id INTEGER,
+                                   message_text TEXT,
+                                   timestamp TEXT,
+                                   media_type TEXT DEFAULT 'text',
+                                   file_id TEXT)''')
             try:
                 cursor.execute("ALTER TABLE messages ADD COLUMN media_type TEXT DEFAULT 'text'")
-            except sqlite3.OperationalError:
+            except Exception:
                 pass
             try:
                 cursor.execute("ALTER TABLE messages ADD COLUMN file_id TEXT")
-            except sqlite3.OperationalError:
+            except Exception:
                 pass
 
 
     @staticmethod
     def add(user_id: int, message_id: int, message_text: Union[str, None], timestamp: str, media_type: str = "text", file_id: Union[str, None] = None):
-        with sqlite3.connect(Messagesx.PATH_DATABASE) as con:
-            con.row_factory = dict_factory
-            con.execute(
-                f"INSERT INTO {Messagesx.storage_name} (user_id, message_id, message_text, timestamp, media_type, file_id) VALUES (?, ?, ?, ?, ?, ?)",
+        with db_session() as con:
+            cursor = con.cursor()
+            cursor.execute(
+                f"INSERT INTO messages (user_id, message_id, message_text, timestamp, media_type, file_id) VALUES ({PLACEHOLDER}, {PLACEHOLDER}, {PLACEHOLDER}, {PLACEHOLDER}, {PLACEHOLDER}, {PLACEHOLDER})",
                 [user_id, message_id, message_text, timestamp, media_type, file_id],
             )
 
 
     @staticmethod
     def get(user_id: int, message_id: int) -> Union[MessageRecord, None]:
-        with sqlite3.connect(Messagesx.PATH_DATABASE) as con:
-            con.row_factory = dict_factory
-            sql = f"SELECT * FROM {Messagesx.storage_name} WHERE user_id = ? AND message_id = ?"
-            response = con.execute(sql, [user_id, message_id]).fetchone()
+        with db_session() as con:
+            cursor = get_db_cursor(con)
+            sql = f"SELECT * FROM messages WHERE user_id = {PLACEHOLDER} AND message_id = {PLACEHOLDER}"
+            cursor.execute(sql, [user_id, message_id])
+            response = cursor.fetchone()
             if response is not None:
-                response = MessageRecord(**response)
+                response = MessageRecord(**dict(response))
             return response
 
 
     @staticmethod
     def update(user_id: int, message_id: int, **kwargs):
-        with sqlite3.connect(Messagesx.PATH_DATABASE) as con:
-            con.row_factory = dict_factory
-            sql = f"UPDATE {Messagesx.storage_name} SET"
+        with db_session() as con:
+            cursor = con.cursor()
+            sql = f"UPDATE messages SET"
             sql, parameters = update_format(sql, kwargs)
             parameters.extend([user_id, message_id])
-            con.execute(sql + " WHERE user_id = ? AND message_id = ?", parameters)
+            cursor.execute(sql + f" WHERE user_id = {PLACEHOLDER} AND message_id = {PLACEHOLDER}", parameters)
 
 
     @staticmethod
     def delete(user_id: int, message_id: int):
-        with sqlite3.connect(Messagesx.PATH_DATABASE) as con:
-            con.row_factory = dict_factory
-            sql = f"DELETE FROM {Messagesx.storage_name} WHERE user_id = ? AND message_id = ?"
-            con.execute(sql, [user_id, message_id])
+        with db_session() as con:
+            cursor = con.cursor()
+            sql = f"DELETE FROM messages WHERE user_id = {PLACEHOLDER} AND message_id = {PLACEHOLDER}"
+            cursor.execute(sql, [user_id, message_id])
 
 
     @staticmethod
     def delete_old_messages(cutoff_timestamp: str):
-        with sqlite3.connect(Messagesx.PATH_DATABASE) as con:
-            sql = f"DELETE FROM {Messagesx.storage_name} WHERE timestamp < ?"
-            con.execute(sql, [cutoff_timestamp])
+        with db_session() as con:
+            cursor = con.cursor()
+            sql = f"DELETE FROM messages WHERE timestamp < {PLACEHOLDER}"
+            cursor.execute(sql, [cutoff_timestamp])
 
 
 class ConnectionsDB:
     storage_name = "connections"
-    PATH_DATABASE = "messages.db"
 
     @staticmethod
     def create_table():
-        with sqlite3.connect(ConnectionsDB.PATH_DATABASE) as conn:
+        with db_session() as conn:
             cursor = conn.cursor()
-            cursor.execute('''CREATE TABLE IF NOT EXISTS connections
-                              (connection_id TEXT PRIMARY KEY, user_id INTEGER)''')
+            if DATABASE_URL:
+                cursor.execute('''CREATE TABLE IF NOT EXISTS connections
+                                  (connection_id TEXT PRIMARY KEY, user_id BIGINT)''')
+            else:
+                cursor.execute('''CREATE TABLE IF NOT EXISTS connections
+                                  (connection_id TEXT PRIMARY KEY, user_id INTEGER)''')
 
     @staticmethod
     def add_or_update(connection_id: str, user_id: int):
-        with sqlite3.connect(ConnectionsDB.PATH_DATABASE) as conn:
+        with db_session() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                f"INSERT OR REPLACE INTO {ConnectionsDB.storage_name} (connection_id, user_id) VALUES (?, ?)",
-                [connection_id, user_id]
-            )
+            if DATABASE_URL:
+                cursor.execute(
+                    f"INSERT INTO connections (connection_id, user_id) VALUES (%s, %s) ON CONFLICT (connection_id) DO UPDATE SET user_id = EXCLUDED.user_id",
+                    [connection_id, user_id]
+                )
+            else:
+                cursor.execute(
+                    f"INSERT OR REPLACE INTO connections (connection_id, user_id) VALUES (?, ?)",
+                    [connection_id, user_id]
+                )
 
     @staticmethod
     def get_user_id(connection_id: str) -> Union[int, None]:
-        with sqlite3.connect(ConnectionsDB.PATH_DATABASE) as conn:
-            cursor = conn.cursor()
+        with db_session() as conn:
+            cursor = get_db_cursor(conn)
             cursor.execute(
-                f"SELECT user_id FROM {ConnectionsDB.storage_name} WHERE connection_id = ?",
+                f"SELECT user_id FROM connections WHERE connection_id = {PLACEHOLDER}",
                 [connection_id]
             )
             row = cursor.fetchone()
-            return row[0] if row else None
+            return row['user_id'] if row else None
 
     @staticmethod
     def delete(connection_id: str):
-        with sqlite3.connect(ConnectionsDB.PATH_DATABASE) as conn:
+        with db_session() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"DELETE FROM {ConnectionsDB.storage_name} WHERE connection_id = ?",
+                f"DELETE FROM connections WHERE connection_id = {PLACEHOLDER}",
                 [connection_id]
             )
 

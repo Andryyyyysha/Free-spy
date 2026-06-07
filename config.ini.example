@@ -2,3 +2,7 @@
 TOKEN = YOUR_BOT_TOKEN_HERE
 USER_ID = YOUR_TELEGRAM_USER_ID_HERE
 TIMEZONE_NAME = Europe/Moscow
+
+# (Optional) Leave empty to use local messages.db SQLite.
+# To use cloud database, paste your PostgreSQL Connection URI here (e.g. postgresql://user:password@host:port/dbname).
+DATABASE_URL = 
