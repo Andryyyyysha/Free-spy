@@ -81,6 +81,11 @@ DELETED_MESSAGE_FORMAT = (
     "<blockquote>{old_text}</blockquote>"
 )
 
+DELETED_MESSAGE_NO_CONTENT_FORMAT = (
+    "🗑 <b>Удалено {media_name} от {user_fullname_escaped}</b> (ID: <code>{user_id}</code>)\n"
+    "⏰ <b>Время отправки:</b> {timestamp}"
+)
+
 EDITED_MESSAGE_FORMAT = (
     "📝 <b>Изменено {media_name} от {user_fullname_escaped}</b> (ID: <code>{user_id}</code>)\n"
     "⏰ <b>Время отправки:</b> {timestamp}\n\n"
@@ -340,23 +345,24 @@ async def send_msg(
     if message_old:
         old_text_escaped = escape(message_old)
     else:
-        if media_type == "sticker":
-            old_text_escaped = "<i>[Стикер]</i>"
-        elif media_type == "video_note":
-            old_text_escaped = "<i>[Кружок]</i>"
-        elif media_type == "voice":
-            old_text_escaped = "<i>[Голосовое сообщение]</i>"
-        else:
-            old_text_escaped = "<i>(без описания/текста)</i>"
+        old_text_escaped = "<i>(без описания/текста)</i>"
             
     if message_new is None:
-        msg = DELETED_MESSAGE_FORMAT.format(
-            media_name=media_name,
-            user_fullname_escaped=user_fullname_escaped,
-            user_id=user_id,
-            timestamp=timestamp,
-            old_text=old_text_escaped
-        )
+        if media_type != "text" and not message_old:
+            msg = DELETED_MESSAGE_NO_CONTENT_FORMAT.format(
+                media_name=media_name,
+                user_fullname_escaped=user_fullname_escaped,
+                user_id=user_id,
+                timestamp=timestamp
+            )
+        else:
+            msg = DELETED_MESSAGE_FORMAT.format(
+                media_name=media_name,
+                user_fullname_escaped=user_fullname_escaped,
+                user_id=user_id,
+                timestamp=timestamp,
+                old_text=old_text_escaped
+            )
         
         if media_type != "text" and file_id:
             try:
@@ -405,7 +411,7 @@ async def send_msg(
         else:
             await bot.send_message(recipient_id, msg, parse_mode='html')
     else:
-        new_text_escaped = escape(message_new)
+        new_text_escaped = escape(message_new) if message_new else "<i>(без описания/текста)</i>"
         msg = EDITED_MESSAGE_FORMAT.format(
             media_name=media_name,
             user_fullname_escaped=user_fullname_escaped,
@@ -414,7 +420,52 @@ async def send_msg(
             old_text=old_text_escaped,
             new_text=new_text_escaped
         )
-        await bot.send_message(recipient_id, msg, parse_mode='html')
+        if media_type != "text" and file_id:
+            try:
+                if media_type == "photo":
+                    await bot.send_photo(recipient_id, photo=file_id, caption=msg, parse_mode='html')
+                elif media_type == "video":
+                    await bot.send_video(recipient_id, video=file_id, caption=msg, parse_mode='html')
+                elif media_type == "voice":
+                    await bot.send_voice(recipient_id, voice=file_id, caption=msg, parse_mode='html')
+                elif media_type == "video_note":
+                    await bot.send_message(recipient_id, msg, parse_mode='html')
+                    await bot.send_video_note(recipient_id, video_note=file_id)
+                elif media_type == "document":
+                    await bot.send_document(recipient_id, document=file_id, caption=msg, parse_mode='html')
+                elif media_type == "audio":
+                    await bot.send_audio(recipient_id, audio=file_id, caption=msg, parse_mode='html')
+                elif media_type == "sticker":
+                    await bot.send_message(recipient_id, msg, parse_mode='html')
+                    await bot.send_sticker(recipient_id, sticker=file_id)
+                elif media_type == "animation":
+                    await bot.send_animation(recipient_id, animation=file_id, caption=msg, parse_mode='html')
+                else:
+                    await bot.send_message(recipient_id, msg, parse_mode='html')
+            except Exception as e:
+                logger.error(f"Failed to send edited media with caption: {e}")
+                try:
+                    await bot.send_message(recipient_id, msg, parse_mode='html')
+                    if media_type == "photo":
+                        await bot.send_photo(recipient_id, photo=file_id)
+                    elif media_type == "video":
+                        await bot.send_video(recipient_id, video=file_id)
+                    elif media_type == "voice":
+                        await bot.send_voice(recipient_id, voice=file_id)
+                    elif media_type == "video_note":
+                        await bot.send_video_note(recipient_id, video_note=file_id)
+                    elif media_type == "document":
+                        await bot.send_document(recipient_id, document=file_id)
+                    elif media_type == "audio":
+                        await bot.send_audio(recipient_id, audio=file_id)
+                    elif media_type == "sticker":
+                        await bot.send_sticker(recipient_id, sticker=file_id)
+                    elif media_type == "animation":
+                        await bot.send_animation(recipient_id, animation=file_id)
+                except Exception as e2:
+                    logger.error(f"Fallback media sending also failed: {e2}")
+        else:
+            await bot.send_message(recipient_id, msg, parse_mode='html')
 
 
 @router.business_connection()
@@ -507,7 +558,7 @@ async def edited_business_message(message: types.Message):
             timestamp_formatted = message_timestamp.strftime('%d/%m/%y %H:%M')
             await send_msg(
                 message_old=user_msg.message_text,
-                message_new=message.text or message.caption,
+                message_new=message.text or message.caption or "",
                 user_fullname=message.from_user.full_name,
                 user_id=message.chat.id,
                 timestamp=timestamp_formatted,
