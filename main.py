@@ -146,14 +146,14 @@ class Messagesx:
                                    timestamp TEXT,
                                    media_type TEXT DEFAULT 'text',
                                    file_id TEXT)''')
-            try:
-                cursor.execute("ALTER TABLE messages ADD COLUMN media_type TEXT DEFAULT 'text'")
-            except Exception:
-                pass
-            try:
-                cursor.execute("ALTER TABLE messages ADD COLUMN file_id TEXT")
-            except Exception:
-                pass
+                try:
+                    cursor.execute("ALTER TABLE messages ADD COLUMN media_type TEXT DEFAULT 'text'")
+                except Exception:
+                    pass
+                try:
+                    cursor.execute("ALTER TABLE messages ADD COLUMN file_id TEXT")
+                except Exception:
+                    pass
 
 
     @staticmethod
