@@ -4,7 +4,7 @@
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Claxy-mod/Free-spy)
 
-## Фичи
+## Функционал
 
 * **Поддержка любых медиа** — сохраняет текст, фото, видео, голосовые сообщения, кружки, документы, аудио, стикеры и GIF.
 * **Работа в реальном времени** — логирует изменения и удаления сообщений на лету.
