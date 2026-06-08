@@ -191,7 +191,7 @@ class MessageRecord(BaseModel):
     file_id: Union[str, None] = None
 
 
-class Messagesx:
+class MessageStore:
     storage_name = "messages"
 
     @staticmethod
@@ -520,7 +520,7 @@ async def cleanup_old_messages():
         await asyncio.sleep(sleep_seconds)
         cutoff_datetime = datetime.now(timezone.utc) - timedelta(days=30)
         cutoff_timestamp_iso = cutoff_datetime.isoformat()
-        await Messagesx.delete_old_messages(cutoff_timestamp_iso)
+        await MessageStore.delete_old_messages(cutoff_timestamp_iso)
 
 
 BOT_VERSION = "1.7.0"
@@ -584,14 +584,13 @@ async def check_and_broadcast_changelog(bot: Bot):
             pass
 
     # 2. Send startup notification to admin
-    if USER_ID > 0:
-        admin_settings = await UserSettingsDB.get_settings(USER_ID)
-        if admin_settings.get("notify_startup", 1) == 1:
-            try:
-                status_text = "перезапущен" if is_restart else "запущен"
-                await bot.send_message(USER_ID, f"🤖 Бот успешно {status_text}!")
-            except Exception as e:
-                logger.warning(f"Failed to send startup notification to admin: {e}")
+    admin_settings = await UserSettingsDB.get_settings(USER_ID)
+    if admin_settings.get("notify_startup", 1) == 1:
+        try:
+            status_text = "перезапущен" if is_restart else "запущен"
+            await bot.send_message(USER_ID, f"🤖 Бот успешно {status_text}!")
+        except Exception as e:
+            logger.warning(f"Failed to send startup notification to admin: {e}")
 
     # 3. If it was a cold start (downtime > 15 mins), notify regular users
     if not is_restart:
@@ -1232,12 +1231,12 @@ async def edited_business_message(message: types.Message):
         recipient_id = await ConnectionsDB.get_user_id(message.business_connection_id)
         if not recipient_id:
             return
-        user_msg = await Messagesx.get(user_id=message.from_user.id, message_id=message.message_id)
+        user_msg = await MessageStore.get(user_id=message.from_user.id, message_id=message.message_id)
         if not user_msg:
             # Retry up to 10 times with 0.1s sleep to handle concurrent insert/edit race condition
             for _ in range(10):
                 await asyncio.sleep(0.1)
-                user_msg = await Messagesx.get(user_id=message.from_user.id, message_id=message.message_id)
+                user_msg = await MessageStore.get(user_id=message.from_user.id, message_id=message.message_id)
                 if user_msg:
                     break
         if user_msg:
@@ -1269,7 +1268,7 @@ async def edited_business_message(message: types.Message):
                     file_id=user_msg.file_id,
                     bot=message.bot
                 )
-            await Messagesx.update(user_id=message.from_user.id, message_id=message.message_id, message_text=message.text or message.caption)
+            await MessageStore.update(user_id=message.from_user.id, message_id=message.message_id, message_text=message.text or message.caption)
 
 
 @router.deleted_business_messages()
@@ -1282,12 +1281,12 @@ async def deleted_business_messages(event: types.BusinessMessagesDeleted, bot: B
     if not recipient_id:
         return
     for msg_id in event.message_ids:
-        user_msg = await Messagesx.get(user_id=user_id, message_id=msg_id)
+        user_msg = await MessageStore.get(user_id=user_id, message_id=msg_id)
         if not user_msg:
             # Retry up to 10 times with 0.1s sleep to handle concurrent insert/delete race condition
             for _ in range(10):
                 await asyncio.sleep(0.1)
-                user_msg = await Messagesx.get(user_id=user_id, message_id=msg_id)
+                user_msg = await MessageStore.get(user_id=user_id, message_id=msg_id)
                 if user_msg:
                     break
         if user_msg:
@@ -1328,7 +1327,7 @@ async def deleted_business_messages(event: types.BusinessMessagesDeleted, bot: B
                             logger.info(f"Deleted local file after deletion: {f}")
                         except Exception as e:
                             logger.warning(f"Failed to delete local file {f}: {e}")
-            await Messagesx.delete(user_id=user_id, message_id=msg_id)
+            await MessageStore.delete(user_id=user_id, message_id=msg_id)
 
 
 async def download_media(bot: Bot, file_id: str) -> Union[str, None]:
@@ -1477,7 +1476,7 @@ async def business_message(message: types.Message):
         message_datetime_utc = message.date.replace(tzinfo=timezone.utc)
         timestamp_iso = message_datetime_utc.isoformat()
         
-        await Messagesx.add(
+        await MessageStore.add(
             user_id=user_id,
             message_id=message.message_id,
             message_text=message_text,
@@ -1542,7 +1541,7 @@ async def on_startup(bot: Bot):
     
     logger.info("Running database migrations/initialization...")
     # Initialize DB tables asynchronously
-    await Messagesx.create_db()
+    await MessageStore.create_db()
     await ConnectionsDB.create_table()
     await SystemStateDB.create_table()
     await UserSettingsDB.create_table()
