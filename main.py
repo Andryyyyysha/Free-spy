@@ -610,31 +610,32 @@ async def check_and_broadcast_changelog(bot: Bot):
                     except Exception as e:
                         logger.warning(f"Failed to send recovery notification to {uid}: {e}")
 
-    # 4. Check and broadcast changelog
-    try:
-        last_broadcasted = await SystemStateDB.get_value("last_broadcasted_version")
-        if last_broadcasted != BOT_VERSION:
-            logger.info(f"Broadcasting changelog for version {BOT_VERSION}...")
-            
-            user_ids = await UserSettingsDB.get_all_user_ids()
-                
-            if user_ids:
-                success_count = 0
-                for uid in user_ids:
-                    user_settings = await UserSettingsDB.get_settings(uid)
-                    if user_settings.get("notify_updates", 1) == 1:
-                        try:
-                            await bot.send_message(uid, CHANGELOG_TEXT, parse_mode="html")
-                            success_count += 1
-                            await asyncio.sleep(0.05)
-                        except Exception as e:
-                            logger.warning(f"Failed to send changelog to {uid}: {e}")
-                logger.info(f"Changelog broadcasted to {success_count}/{len(user_ids)} users.")
-            
-            # Save that we have broadcasted this version
-            await SystemStateDB.set_value("last_broadcasted_version", BOT_VERSION)
-    except Exception as e:
-        logger.error(f"Error during changelog check/broadcast: {e}")
+    # 4. Check and broadcast changelog (Disabled by user request)
+    # try:
+    #     last_broadcasted = await SystemStateDB.get_value("last_broadcasted_version")
+    #     if last_broadcasted != BOT_VERSION:
+    #         logger.info(f"Broadcasting changelog for version {BOT_VERSION}...")
+    #         
+    #         user_ids = await UserSettingsDB.get_all_user_ids()
+    #             
+    #         if user_ids:
+    #             success_count = 0
+    #             for uid in user_ids:
+    #                 user_settings = await UserSettingsDB.get_settings(uid)
+    #                 if user_settings.get("notify_updates", 1) == 1:
+    #                     try:
+    #                         await bot.send_message(uid, CHANGELOG_TEXT, parse_mode="html")
+    #                         success_count += 1
+    #                         await asyncio.sleep(0.05)
+    #                     except Exception as e:
+    #                         logger.warning(f"Failed to send changelog to {uid}: {e}")
+    #             logger.info(f"Changelog broadcasted to {success_count}/{len(user_ids)} users.")
+    #         
+    #         # Save that we have broadcasted this version
+    #         await SystemStateDB.set_value("last_broadcasted_version", BOT_VERSION)
+    # except Exception as e:
+    #     logger.error(f"Error during changelog check/broadcast: {e}")
+    pass
 
 
 MEDIA_NAMES = {
