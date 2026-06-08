@@ -1392,7 +1392,9 @@ async def business_message(message: types.Message):
                     local_path = await download_media(message.bot, file_id)
                     if local_path:
                         media_name = MEDIA_NAMES.get(media_type, "медиа")
-                        caption = f"💾 <b>Сохранено {media_name} из ответа на сообщение</b>"
+                        caption = f"💾 <b>Сохранено {media_name}</b>"
+                        if replied_msg.caption and replied_msg.caption.strip():
+                            caption += f"\n\n💬 <b>Подпись:</b>\n<blockquote>{escape(replied_msg.caption)}</blockquote>"
                         media_val = types.FSInputFile(local_path)
                         try:
                             if media_type == "photo":
