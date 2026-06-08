@@ -19,6 +19,6 @@ services:
       - key: USER_ID
         sync: false
       - key: ENCRYPTION_KEY
-        generateValue: true
+        sync: false
       - key: TIMEZONE_NAME
         value: Europe/Moscow

@@ -1,17 +1,17 @@
 import configparser
-import importlib
 import os
 import sqlite3
 import gc
 import sys
 import signal
+import glob
 try:
     import resource
 except ImportError:
     resource = None
 from pydantic import BaseModel
 import asyncio
-from typing import Union
+from typing import Union, Any
 import logging
 from aiogram import Router, Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -21,6 +21,14 @@ import pytz
 from contextlib import contextmanager
 from aiohttp import web
 from cryptography.fernet import Fernet
+
+try:
+    import psycopg2
+    from psycopg2.pool import ThreadedConnectionPool
+    from psycopg2.extras import RealDictCursor
+    psycopg2_available = True
+except ImportError:
+    psycopg2_available = False
 
 config = configparser.ConfigParser()
 # Make config loading robust relative to script location
@@ -32,21 +40,14 @@ ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY")
 if not ENCRYPTION_KEY:
     ENCRYPTION_KEY = config.get("settings", "ENCRYPTION_KEY", fallback="")
 
-# If key is missing, generate a temporary one (fallback)
 if not ENCRYPTION_KEY:
-    ENCRYPTION_KEY = Fernet.generate_key().decode()
-    logging.warning("ENCRYPTION_KEY is not set! Generated a temporary key for this session. Messages won't be readable after bot restarts.")
+    raise ValueError("ENCRYPTION_KEY is not configured! Please generate a key with generate_key.py and set it in config.ini or environment variables.")
 
-# Validate and format key for Fernet compatibility
+# Validate key format strictly
 try:
     Fernet(ENCRYPTION_KEY.encode())
-except Exception:
-    import base64
-    import hashlib
-    logging.info("Hashing ENCRYPTION_KEY to derive a valid 32-byte Fernet key...")
-    key_bytes = ENCRYPTION_KEY.encode()
-    hash_bytes = hashlib.sha256(key_bytes).digest()
-    ENCRYPTION_KEY = base64.urlsafe_b64encode(hash_bytes).decode()
+except Exception as e:
+    raise ValueError(f"Invalid ENCRYPTION_KEY format: {e}. The key must be a valid 32-byte url-safe base64-encoded key.")
 
 cipher_suite = Fernet(ENCRYPTION_KEY.encode())
 
@@ -74,13 +75,16 @@ user_id_env = os.environ.get("USER_ID")
 if user_id_env:
     try:
         USER_ID = int(user_id_env)
-    except ValueError:
-        USER_ID = 0
+    except ValueError as e:
+        raise ValueError(f"USER_ID environment variable must be a valid integer, got '{user_id_env}'") from e
 else:
     try:
         USER_ID = config.getint("settings", "USER_ID")
-    except (configparser.NoSectionError, configparser.NoOptionError, ValueError):
-        USER_ID = 0
+    except (configparser.NoSectionError, configparser.NoOptionError, ValueError) as e:
+        raise ValueError("USER_ID is not configured! Please set USER_ID in config.ini or environment variables.") from e
+
+if USER_ID <= 0:
+    raise ValueError(f"USER_ID must be a positive integer, got {USER_ID}")
 
 TIMEZONE_NAME = os.environ.get("TIMEZONE_NAME")
 if not TIMEZONE_NAME:
@@ -91,6 +95,8 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
     DATABASE_URL = config.get("settings", "DATABASE_URL", fallback="")
 PLACEHOLDER = "%s" if DATABASE_URL else "?"
+
+db_pool = None
 
 DELETED_MESSAGE_FORMAT = (
     "🗑 <b>Удалено {media_name} от {user_fullname_escaped}</b> (ID: <code>{user_id}</code>)\n"
@@ -121,45 +127,43 @@ logging.basicConfig(level=logging.INFO, force=True)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-def dict_factory(cursor, row) -> dict:
-    save_dict = {}
-    for idx, col in enumerate(cursor.description):
-        save_dict[col[0]] = row[idx]
-    return save_dict
-
-
-def get_db_connection():
-    if DATABASE_URL:
-        import psycopg2
-        return psycopg2.connect(DATABASE_URL)
-    else:
-        # Resolve path to messages.db relative to parent of test/ directory if in test/
-        db_path = "messages.db"
-        if os.path.basename(BASE_DIR) == "test":
-            db_path = os.path.join(os.path.dirname(BASE_DIR), "messages.db")
-        return sqlite3.connect(db_path)
-
-
 def get_db_cursor(conn):
     if DATABASE_URL:
-        from psycopg2.extras import RealDictCursor
         return conn.cursor(cursor_factory=RealDictCursor)
     else:
-        conn.row_factory = dict_factory
+        conn.row_factory = sqlite3.Row
         return conn.cursor()
 
 
 @contextmanager
 def db_session():
-    conn = get_db_connection()
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    if DATABASE_URL:
+        if not psycopg2_available:
+            raise RuntimeError("psycopg2 is not installed but DATABASE_URL is set.")
+        if not db_pool:
+            raise RuntimeError("Database connection pool is not initialized.")
+        conn = db_pool.getconn()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            db_pool.putconn(conn)
+    else:
+        db_path = "messages.db"
+        if os.path.basename(BASE_DIR) == "test":
+            db_path = os.path.join(os.path.dirname(BASE_DIR), "messages.db")
+        conn = sqlite3.connect(db_path)
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
 # Whitelist of allowed column names to prevent SQL Injection
@@ -292,7 +296,6 @@ class Messagesx:
                 
         file_ids = await asyncio.to_thread(_sync)
         if file_ids:
-            import glob
             downloads_dir = os.path.join(BASE_DIR, "downloads")
             for fid in file_ids:
                 files = glob.glob(os.path.join(downloads_dir, f"{fid}.*"))
@@ -520,12 +523,12 @@ async def cleanup_old_messages():
         await Messagesx.delete_old_messages(cutoff_timestamp_iso)
 
 
-BOT_VERSION = "1.6.0"
+BOT_VERSION = "1.7.0"
 CHANGELOG_TEXT = (
-    "📢 <b>Обновление бота (v1.6.0):</b>\n\n"
-    "• <b>Создание зеркал в 1 клик:</b> Теперь прямо через меню бота вы можете развернуть собственную копию на бесплатном сервере Render.\n"
-    "• <b>Авто-пинг (Self-ping):</b> Все новые зеркала будут автоматически пинговать себя каждые 5 минут, предотвращая засыпание сервера без использования UptimeRobot.\n"
-    "• <b>Личный режим:</b> Добавлено пояснение об ограничении доступа к зеркалу при указании USER_ID."
+    f"📢 <b>Обновление бота (v{BOT_VERSION}):</b>\n\n"
+    "• <b>Безопасность на старте:</b> Бот больше не запустится с некорректным USER_ID или невалидным ENCRYPTION_KEY. Никаких автогенераций временных ключей и рисков утечек.\n"
+    "• <b>Пул соединений (Connection Pooling):</b> Оптимизирована работа с PostgreSQL (Supabase) — теперь бот использует пул соединений, что исключает ошибки перегрузки БД.\n"
+    "• <b>Улучшение кода:</b> Проведен глубокий рефакторинг отправки медиа и чистка неиспользуемых импортов."
 )
 
 
@@ -647,6 +650,58 @@ MEDIA_NAMES = {
 }
 
 
+async def _send_media_with_fallback(
+    bot: Bot,
+    recipient_id: int,
+    media_type: str,
+    media_val: Union[types.FSInputFile, str],
+    msg: str
+):
+    try:
+        if media_type == "photo":
+            await bot.send_photo(recipient_id, photo=media_val, caption=msg, parse_mode='html')
+        elif media_type == "video":
+            await bot.send_video(recipient_id, video=media_val, caption=msg, parse_mode='html')
+        elif media_type == "voice":
+            await bot.send_voice(recipient_id, voice=media_val, caption=msg, parse_mode='html')
+        elif media_type == "video_note":
+            await bot.send_message(recipient_id, msg, parse_mode='html')
+            await bot.send_video_note(recipient_id, video_note=media_val)
+        elif media_type == "document":
+            await bot.send_document(recipient_id, document=media_val, caption=msg, parse_mode='html')
+        elif media_type == "audio":
+            await bot.send_audio(recipient_id, audio=media_val, caption=msg, parse_mode='html')
+        elif media_type == "sticker":
+            await bot.send_message(recipient_id, msg, parse_mode='html')
+            await bot.send_sticker(recipient_id, sticker=media_val)
+        elif media_type == "animation":
+            await bot.send_animation(recipient_id, animation=media_val, caption=msg, parse_mode='html')
+        else:
+            await bot.send_message(recipient_id, msg, parse_mode='html')
+    except Exception as e:
+        logger.error(f"Failed to send media with caption: {e}")
+        try:
+            await bot.send_message(recipient_id, msg, parse_mode='html')
+            if media_type == "photo":
+                await bot.send_photo(recipient_id, photo=media_val)
+            elif media_type == "video":
+                await bot.send_video(recipient_id, video=media_val)
+            elif media_type == "voice":
+                await bot.send_voice(recipient_id, voice=media_val)
+            elif media_type == "video_note":
+                await bot.send_video_note(recipient_id, video_note=media_val)
+            elif media_type == "document":
+                await bot.send_document(recipient_id, document=media_val)
+            elif media_type == "audio":
+                await bot.send_audio(recipient_id, audio=media_val)
+            elif media_type == "sticker":
+                await bot.send_sticker(recipient_id, sticker=media_val)
+            elif media_type == "animation":
+                await bot.send_animation(recipient_id, animation=media_val)
+        except Exception as e2:
+            logger.error(f"Fallback media sending also failed: {e2}")
+
+
 async def send_msg(
     message_old: str,
     message_new: Union[str, None],
@@ -654,10 +709,10 @@ async def send_msg(
     user_id: int,
     timestamp: str,
     recipient_id: int,
+    bot: Bot,
     username: Union[str, None] = None,
     media_type: str = "text",
-    file_id: Union[str, None] = None,
-    bot: Bot = None
+    file_id: Union[str, None] = None
 ):
     if username:
         user_display = f"{user_fullname} (@{username})"
@@ -675,7 +730,6 @@ async def send_msg(
     # Resolve local path if downloaded
     local_path = None
     if file_id:
-        import glob
         downloads_dir = os.path.join(BASE_DIR, "downloads")
         files = glob.glob(os.path.join(downloads_dir, f"{file_id}.*"))
         if files:
@@ -701,49 +755,7 @@ async def send_msg(
             )
         
         if media_type != "text" and file_id:
-            try:
-                if media_type == "photo":
-                    await bot.send_photo(recipient_id, photo=media_val, caption=msg, parse_mode='html')
-                elif media_type == "video":
-                    await bot.send_video(recipient_id, video=media_val, caption=msg, parse_mode='html')
-                elif media_type == "voice":
-                    await bot.send_voice(recipient_id, voice=media_val, caption=msg, parse_mode='html')
-                elif media_type == "video_note":
-                    await bot.send_message(recipient_id, msg, parse_mode='html')
-                    await bot.send_video_note(recipient_id, video_note=media_val)
-                elif media_type == "document":
-                    await bot.send_document(recipient_id, document=media_val, caption=msg, parse_mode='html')
-                elif media_type == "audio":
-                    await bot.send_audio(recipient_id, audio=media_val, caption=msg, parse_mode='html')
-                elif media_type == "sticker":
-                    await bot.send_message(recipient_id, msg, parse_mode='html')
-                    await bot.send_sticker(recipient_id, sticker=media_val)
-                elif media_type == "animation":
-                    await bot.send_animation(recipient_id, animation=media_val, caption=msg, parse_mode='html')
-                else:
-                    await bot.send_message(recipient_id, msg, parse_mode='html')
-            except Exception as e:
-                logger.error(f"Failed to send deleted media with caption: {e}")
-                try:
-                    await bot.send_message(recipient_id, msg, parse_mode='html')
-                    if media_type == "photo":
-                        await bot.send_photo(recipient_id, photo=media_val)
-                    elif media_type == "video":
-                        await bot.send_video(recipient_id, video=media_val)
-                    elif media_type == "voice":
-                        await bot.send_voice(recipient_id, voice=media_val)
-                    elif media_type == "video_note":
-                        await bot.send_video_note(recipient_id, video_note=media_val)
-                    elif media_type == "document":
-                        await bot.send_document(recipient_id, document=media_val)
-                    elif media_type == "audio":
-                        await bot.send_audio(recipient_id, audio=media_val)
-                    elif media_type == "sticker":
-                        await bot.send_sticker(recipient_id, sticker=media_val)
-                    elif media_type == "animation":
-                        await bot.send_animation(recipient_id, animation=media_val)
-                except Exception as e2:
-                    logger.error(f"Fallback media sending also failed: {e2}")
+            await _send_media_with_fallback(bot, recipient_id, media_type, media_val, msg)
         else:
             await bot.send_message(recipient_id, msg, parse_mode='html')
     else:
@@ -757,49 +769,7 @@ async def send_msg(
             new_text=new_text_escaped
         )
         if media_type != "text" and file_id:
-            try:
-                if media_type == "photo":
-                    await bot.send_photo(recipient_id, photo=media_val, caption=msg, parse_mode='html')
-                elif media_type == "video":
-                    await bot.send_video(recipient_id, video=media_val, caption=msg, parse_mode='html')
-                elif media_type == "voice":
-                    await bot.send_voice(recipient_id, voice=media_val, caption=msg, parse_mode='html')
-                elif media_type == "video_note":
-                    await bot.send_message(recipient_id, msg, parse_mode='html')
-                    await bot.send_video_note(recipient_id, video_note=media_val)
-                elif media_type == "document":
-                    await bot.send_document(recipient_id, document=media_val, caption=msg, parse_mode='html')
-                elif media_type == "audio":
-                    await bot.send_audio(recipient_id, audio=media_val, caption=msg, parse_mode='html')
-                elif media_type == "sticker":
-                    await bot.send_message(recipient_id, msg, parse_mode='html')
-                    await bot.send_sticker(recipient_id, sticker=media_val)
-                elif media_type == "animation":
-                    await bot.send_animation(recipient_id, animation=media_val, caption=msg, parse_mode='html')
-                else:
-                    await bot.send_message(recipient_id, msg, parse_mode='html')
-            except Exception as e:
-                logger.error(f"Failed to send edited media with caption: {e}")
-                try:
-                    await bot.send_message(recipient_id, msg, parse_mode='html')
-                    if media_type == "photo":
-                        await bot.send_photo(recipient_id, photo=media_val)
-                    elif media_type == "video":
-                        await bot.send_video(recipient_id, video=media_val)
-                    elif media_type == "voice":
-                        await bot.send_voice(recipient_id, voice=media_val)
-                    elif media_type == "video_note":
-                        await bot.send_video_note(recipient_id, video_note=media_val)
-                    elif media_type == "document":
-                        await bot.send_document(recipient_id, document=media_val)
-                    elif media_type == "audio":
-                        await bot.send_audio(recipient_id, audio=media_val)
-                    elif media_type == "sticker":
-                        await bot.send_sticker(recipient_id, sticker=media_val)
-                    elif media_type == "animation":
-                        await bot.send_animation(recipient_id, animation=media_val)
-                except Exception as e2:
-                    logger.error(f"Fallback media sending also failed: {e2}")
+            await _send_media_with_fallback(bot, recipient_id, media_type, media_val, msg)
         else:
             await bot.send_message(recipient_id, msg, parse_mode='html')
 
@@ -1612,6 +1582,13 @@ async def on_shutdown(bot: Bot):
         await asyncio.gather(*background_tasks, return_exceptions=True)
     
     await stop_web_server()
+
+    global db_pool
+    if db_pool:
+        logger.info("Closing PostgreSQL connection pool...")
+        db_pool.closeall()
+        db_pool = None
+
     logger.info("Graceful shutdown complete.")
 
 
@@ -1637,6 +1614,14 @@ async def raw_update_middleware(handler, event: Update, data):
 
 
 async def main() -> None:
+    # Initialize connection pool if using PostgreSQL
+    global db_pool
+    if DATABASE_URL:
+        if not psycopg2_available:
+            raise RuntimeError("psycopg2 is not installed but DATABASE_URL is set.")
+        logger.info("Initializing PostgreSQL connection pool...")
+        db_pool = ThreadedConnectionPool(1, 20, dsn=DATABASE_URL)
+
     # Start web server for Render keep-alive
     await start_web_server()
 
