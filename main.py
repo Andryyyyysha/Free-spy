@@ -509,11 +509,12 @@ async def cleanup_old_messages():
         await Messagesx.delete_old_messages(cutoff_timestamp_iso)
 
 
-BOT_VERSION = "1.4.0"
+BOT_VERSION = "1.5.0"
 CHANGELOG_TEXT = (
-    "📢 <b>Обновление бота (v1.4.0):</b>\n\n"
-    "• <b>Оповещения для всех:</b> Теперь важные уведомления о работе и обновлениях бота доставляются всем пользователям (даже если ваше бизнес-подключение временно отключено).\n"
-    "• <b>Автоматическая регистрация:</b> Ваши настройки оповещений создаются автоматически сразу после отправки боту команды /start."
+    "📢 <b>Обновление бота (v1.5.0):</b>\n\n"
+    "• <b>Восстановление после сбоев:</b> Теперь при включении бота после технического перерыва пропущенные сообщения группируются в один компактный отчет.\n"
+    "• <b>Загрузка медиа по запросу:</b> Удаленные и измененные за время офлайна медиафайлы теперь скачиваются и присылаются только по вашему подтверждению через кнопку.\n"
+    "• <b>Подписи к медиа:</b> Описания и тексты к пропущенным медиафайлам теперь прикрепляются прямо к самим файлам при выгрузке."
 )
 
 
@@ -1004,6 +1005,217 @@ async def security_info_handler(message: types.Message):
     )
     await message.answer(info_text, parse_mode="html", disable_web_page_preview=True)
 
+# Startup missed updates buffering system
+IS_BOOTING = True
+MISSED_UPDATES_BUFFER = []
+PENDING_STARTUP_MEDIA = {}
+LAST_STARTUP_UPDATE_TIME = 0.0
+
+
+def safe_escape(text: Union[str, None]) -> str:
+    if not text:
+        return "<i>(без описания/текста)</i>"
+    return escape(str(text))
+
+
+async def process_startup_digest(bot: Bot):
+    global IS_BOOTING
+    # Wait at least 3 seconds, and then wait until no updates have been received for 2 seconds
+    await asyncio.sleep(3)
+    while True:
+        now = asyncio.get_event_loop().time()
+        silence_duration = now - LAST_STARTUP_UPDATE_TIME
+        if silence_duration >= 2.0:
+            break
+        await asyncio.sleep(0.5)
+    IS_BOOTING = False
+    logger.info(f"Startup buffering complete. Processing {len(MISSED_UPDATES_BUFFER)} missed updates...")
+    
+    # Group updates by recipient_id
+    grouped = {}
+    for item in MISSED_UPDATES_BUFFER:
+        r_id = item["recipient_id"]
+        if r_id not in grouped:
+            grouped[r_id] = []
+        grouped[r_id].append(item)
+        
+    for r_id, items in grouped.items():
+        text_lines = []
+        media_items = []
+        
+        for item in items:
+            user_display = item["user_fullname"]
+            if item.get("username"):
+                user_display += f" (@{item['username']})"
+            user_display = escape(user_display)
+            user_id = item["user_id"]
+            timestamp = item["timestamp"]
+            media_type = item["media_type"]
+            media_name = MEDIA_NAMES.get(media_type, "сообщение")
+            
+            if item["type"] == "delete":
+                if media_type == "text":
+                    text_lines.append(
+                        f"🗑 <b>Удалено сообщение</b> от {user_display} (ID: <code>{user_id}</code>) в {timestamp}:\n"
+                        f"<blockquote>{safe_escape(item['old_text'])}</blockquote>"
+                    )
+                else:
+                    caption_part = ""
+                    if item.get("old_text") and item["old_text"] != "<i>(без описания/текста)</i>":
+                        caption_part = f"\n<blockquote>Описание: {escape(item['old_text'])}</blockquote>"
+                    text_lines.append(
+                        f"🗑 <b>Удалено {media_name}</b> от {user_display} (ID: <code>{user_id}</code>) в {timestamp}{caption_part}"
+                    )
+                    if item.get("file_id"):
+                        media_items.append(item)
+            elif item["type"] == "edit":
+                if media_type == "text":
+                    text_lines.append(
+                        f"📝 <b>Изменено сообщение</b> от {user_display} (ID: <code>{user_id}</code>) в {timestamp}:\n"
+                        f"<b>Было:</b> <blockquote>{safe_escape(item['old_text'])}</blockquote>\n"
+                        f"<b>Стало:</b> <blockquote>{safe_escape(item['new_text'])}</blockquote>"
+                    )
+                else:
+                    text_lines.append(
+                        f"📝 <b>Изменено описание {media_name}</b> от {user_display} (ID: <code>{user_id}</code>) в {timestamp}:\n"
+                        f"<b>Было:</b> <blockquote>{safe_escape(item['old_text'])}</blockquote>\n"
+                        f"<b>Стало:</b> <blockquote>{safe_escape(item['new_text'])}</blockquote>"
+                    )
+                    if item.get("file_id"):
+                        media_items.append(item)
+                        
+        if text_lines:
+            header = "📋 <b>Отчет о сообщениях, пропущенных за время отсутствия сети:</b>\n\n"
+            current_msg = header
+            for line in text_lines:
+                if len(current_msg) + len(line) + 2 > 4000:
+                    try:
+                        await bot.send_message(r_id, current_msg, parse_mode="html")
+                    except Exception as e:
+                        logger.error(f"Failed to send digest part to {r_id}: {e}")
+                    current_msg = line + "\n\n"
+                else:
+                    current_msg += line + "\n\n"
+            if current_msg:
+                try:
+                    await bot.send_message(r_id, current_msg, parse_mode="html")
+                except Exception as e:
+                    logger.error(f"Failed to send digest to {r_id}: {e}")
+                    
+        if media_items:
+            PENDING_STARTUP_MEDIA[r_id] = media_items
+            kb = [
+                [
+                    types.InlineKeyboardButton(text="📥 Да, прислать", callback_data="startup_media_yes"),
+                    types.InlineKeyboardButton(text="❌ Нет, не нужно", callback_data="startup_media_no")
+                ]
+            ]
+            keyboard = types.InlineKeyboardMarkup(inline_keyboard=kb)
+            try:
+                await bot.send_message(
+                    r_id,
+                    f"📷 За время отсутствия сети были удалены/изменены медиафайлы ({len(media_items)} шт.). Отправить их вам?",
+                    reply_markup=keyboard
+                )
+            except Exception as e:
+                logger.error(f"Failed to send startup media prompt to {r_id}: {e}")
+                
+    # Clear the buffer
+    MISSED_UPDATES_BUFFER.clear()
+
+
+@router.callback_query(F.data.startswith("startup_media_"))
+async def startup_media_callback(callback_query: types.CallbackQuery, bot: Bot):
+    user_id = callback_query.from_user.id
+    action = callback_query.data
+    
+    if action == "startup_media_yes":
+        media_items = PENDING_STARTUP_MEDIA.get(user_id, [])
+        if not media_items:
+            await callback_query.message.edit_text("Медиафайлы не найдены или уже были выгружены.")
+            return
+            
+        await callback_query.message.edit_text(f"Начинаю отправку медиафайлов ({len(media_items)} шт.)...")
+        
+        for item in media_items:
+            media_type = item["media_type"]
+            file_id = item["file_id"]
+            
+            user_display = item["user_fullname"]
+            if item.get("username"):
+                user_display += f" (@{item['username']})"
+            user_display_escaped = escape(user_display)
+            timestamp = item["timestamp"]
+            media_name = MEDIA_NAMES.get(media_type, "сообщение")
+            
+            if item["type"] == "delete":
+                caption = f"💾 <b>Удаленное медиа ({media_name}) от {user_display_escaped}</b> в {timestamp}"
+                if item.get("old_text") and item["old_text"] != "<i>(без описания/текста)</i>":
+                    caption += f"\n\n💬 <b>Содержание:</b>\n<blockquote>{safe_escape(item['old_text'])}</blockquote>"
+            else:
+                caption = f"💾 <b>Измененное медиа ({media_name}) от {user_display_escaped}</b> в {timestamp}"
+                if item.get("old_text") and item["old_text"] != "<i>(без описания/текста)</i>":
+                    caption += f"\n\n<b>Было:</b>\n<blockquote>{safe_escape(item['old_text'])}</blockquote>"
+                if item.get("new_text") and item["new_text"] != "<i>(без описания/текста)</i>":
+                    caption += f"\n\n<b>Стало:</b>\n<blockquote>{safe_escape(item['new_text'])}</blockquote>"
+                
+            local_path = None
+            downloads_dir = os.path.join(BASE_DIR, "downloads")
+            import glob
+            files = glob.glob(os.path.join(downloads_dir, f"{file_id}.*"))
+            if files:
+                local_path = files[0]
+                
+            media_val = types.FSInputFile(local_path) if local_path else file_id
+            
+            try:
+                if media_type == "photo":
+                    await bot.send_photo(user_id, photo=media_val, caption=caption, parse_mode='html')
+                elif media_type == "video":
+                    await bot.send_video(user_id, video=media_val, caption=caption, parse_mode='html')
+                elif media_type == "voice":
+                    await bot.send_voice(user_id, voice=media_val, caption=caption, parse_mode='html')
+                elif media_type == "video_note":
+                    await bot.send_message(user_id, caption, parse_mode='html')
+                    await bot.send_video_note(user_id, video_note=media_val)
+                elif media_type == "document":
+                    await bot.send_document(user_id, document=media_val, caption=caption, parse_mode='html')
+                elif media_type == "audio":
+                    await bot.send_audio(user_id, audio=media_val, caption=caption, parse_mode='html')
+                elif media_type == "sticker":
+                    await bot.send_message(user_id, caption, parse_mode='html')
+                    await bot.send_sticker(user_id, sticker=media_val)
+                elif media_type == "animation":
+                    await bot.send_animation(user_id, animation=media_val, caption=caption, parse_mode='html')
+                
+                if local_path:
+                    try:
+                        os.remove(local_path)
+                    except Exception:
+                        pass
+                await asyncio.sleep(0.1)
+            except Exception as e:
+                logger.error(f"Failed to send media {file_id}: {e}")
+                
+        await callback_query.message.edit_text("Отправка медиафайлов завершена!")
+        PENDING_STARTUP_MEDIA.pop(user_id, None)
+        
+    elif action == "startup_media_no":
+        media_items = PENDING_STARTUP_MEDIA.get(user_id, [])
+        for item in media_items:
+            file_id = item.get("file_id")
+            if file_id:
+                downloads_dir = os.path.join(BASE_DIR, "downloads")
+                import glob
+                files = glob.glob(os.path.join(downloads_dir, f"{file_id}.*"))
+                for f in files:
+                    try:
+                        os.remove(f)
+                    except Exception:
+                        pass
+        PENDING_STARTUP_MEDIA.pop(user_id, None)
+        await callback_query.message.edit_text("Медиафайлы удалены из буфера.")
+
 
 @router.edited_business_message()
 async def edited_business_message(message: types.Message):
@@ -1012,21 +1224,42 @@ async def edited_business_message(message: types.Message):
         if not recipient_id:
             return
         user_msg = await Messagesx.get(user_id=message.from_user.id, message_id=message.message_id)
+        if not user_msg:
+            # Retry up to 10 times with 0.1s sleep to handle concurrent insert/edit race condition
+            for _ in range(10):
+                await asyncio.sleep(0.1)
+                user_msg = await Messagesx.get(user_id=message.from_user.id, message_id=message.message_id)
+                if user_msg:
+                    break
         if user_msg:
             message_timestamp = datetime.fromisoformat(user_msg.timestamp).astimezone(timezone_local)
             timestamp_formatted = message_timestamp.strftime('%d/%m/%y %H:%M')
-            await send_msg(
-                message_old=user_msg.message_text,
-                message_new=message.text or message.caption or "",
-                user_fullname=message.from_user.full_name,
-                user_id=message.chat.id,
-                timestamp=timestamp_formatted,
-                recipient_id=recipient_id,
-                username=message.from_user.username,
-                media_type=user_msg.media_type,
-                file_id=user_msg.file_id,
-                bot=message.bot
-            )
+            if IS_BOOTING:
+                MISSED_UPDATES_BUFFER.append({
+                    "type": "edit",
+                    "recipient_id": recipient_id,
+                    "user_fullname": message.from_user.full_name,
+                    "user_id": message.chat.id,
+                    "username": message.from_user.username,
+                    "timestamp": timestamp_formatted,
+                    "media_type": user_msg.media_type,
+                    "file_id": user_msg.file_id,
+                    "old_text": user_msg.message_text,
+                    "new_text": message.text or message.caption or ""
+                })
+            else:
+                await send_msg(
+                    message_old=user_msg.message_text,
+                    message_new=message.text or message.caption or "",
+                    user_fullname=message.from_user.full_name,
+                    user_id=message.chat.id,
+                    timestamp=timestamp_formatted,
+                    recipient_id=recipient_id,
+                    username=message.from_user.username,
+                    media_type=user_msg.media_type,
+                    file_id=user_msg.file_id,
+                    bot=message.bot
+                )
             await Messagesx.update(user_id=message.from_user.id, message_id=message.message_id, message_text=message.text or message.caption)
 
 
@@ -1041,32 +1274,52 @@ async def deleted_business_messages(event: types.BusinessMessagesDeleted, bot: B
         return
     for msg_id in event.message_ids:
         user_msg = await Messagesx.get(user_id=user_id, message_id=msg_id)
+        if not user_msg:
+            # Retry up to 10 times with 0.1s sleep to handle concurrent insert/delete race condition
+            for _ in range(10):
+                await asyncio.sleep(0.1)
+                user_msg = await Messagesx.get(user_id=user_id, message_id=msg_id)
+                if user_msg:
+                    break
         if user_msg:
             message_timestamp = datetime.fromisoformat(user_msg.timestamp).astimezone(timezone_local)
             timestamp_formatted = message_timestamp.strftime('%d/%m/%y %H:%M')
-            await send_msg(
-                message_old=user_msg.message_text,
-                message_new=None,
-                user_fullname=user_fullname,
-                user_id=user_id,
-                timestamp=timestamp_formatted,
-                recipient_id=recipient_id,
-                username=username,
-                media_type=user_msg.media_type,
-                file_id=user_msg.file_id,
-                bot=bot
-            )
+            if IS_BOOTING:
+                MISSED_UPDATES_BUFFER.append({
+                    "type": "delete",
+                    "recipient_id": recipient_id,
+                    "user_fullname": user_fullname,
+                    "user_id": user_id,
+                    "username": username,
+                    "timestamp": timestamp_formatted,
+                    "media_type": user_msg.media_type,
+                    "file_id": user_msg.file_id,
+                    "old_text": user_msg.message_text
+                })
+            else:
+                await send_msg(
+                    message_old=user_msg.message_text,
+                    message_new=None,
+                    user_fullname=user_fullname,
+                    user_id=user_id,
+                    timestamp=timestamp_formatted,
+                    recipient_id=recipient_id,
+                    username=username,
+                    media_type=user_msg.media_type,
+                    file_id=user_msg.file_id,
+                    bot=bot
+                )
+                if user_msg.file_id:
+                    import glob
+                    downloads_dir = os.path.join(BASE_DIR, "downloads")
+                    files = glob.glob(os.path.join(downloads_dir, f"{user_msg.file_id}.*"))
+                    for f in files:
+                        try:
+                            os.remove(f)
+                            logger.info(f"Deleted local file after deletion: {f}")
+                        except Exception as e:
+                            logger.warning(f"Failed to delete local file {f}: {e}")
             await Messagesx.delete(user_id=user_id, message_id=msg_id)
-            if user_msg.file_id:
-                import glob
-                downloads_dir = os.path.join(BASE_DIR, "downloads")
-                files = glob.glob(os.path.join(downloads_dir, f"{user_msg.file_id}.*"))
-                for f in files:
-                    try:
-                        os.remove(f)
-                        logger.info(f"Deleted local file after deletion: {f}")
-                    except Exception as e:
-                        logger.warning(f"Failed to delete local file {f}: {e}")
 
 
 async def download_media(bot: Bot, file_id: str) -> Union[str, None]:
@@ -1252,6 +1505,9 @@ async def stop_web_server():
 
 
 async def on_startup(bot: Bot):
+    global LAST_STARTUP_UPDATE_TIME
+    LAST_STARTUP_UPDATE_TIME = asyncio.get_event_loop().time()
+    
     logger.info("Running database migrations/initialization...")
     # Initialize DB tables asynchronously
     await Messagesx.create_db()
@@ -1260,6 +1516,10 @@ async def on_startup(bot: Bot):
     await UserSettingsDB.create_table()
 
     logger.info("Starting background tasks...")
+    # Startup digest task
+    task_digest = asyncio.create_task(process_startup_digest(bot))
+    background_tasks.add(task_digest)
+    task_digest.add_done_callback(background_tasks.discard)
     # Startup notification and changelog
     task_changelog = asyncio.create_task(check_and_broadcast_changelog(bot))
     background_tasks.add(task_changelog)
@@ -1295,6 +1555,10 @@ async def on_shutdown(bot: Bot):
 from aiogram.types import Update
 
 async def raw_update_middleware(handler, event: Update, data):
+    global LAST_STARTUP_UPDATE_TIME
+    if IS_BOOTING:
+        LAST_STARTUP_UPDATE_TIME = asyncio.get_event_loop().time()
+        
     logger.info(f"⚡️ RAW UPDATE RECEIVED: ID={event.update_id}, Type={event.event_type}")
     # If it is a business message, let's print if it has photo or video
     if event.business_message:
@@ -1322,7 +1586,7 @@ async def main() -> None:
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     
-    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.delete_webhook(drop_pending_updates=False)
     await dp.start_polling(bot)
 
 
