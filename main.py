@@ -520,12 +520,12 @@ async def cleanup_old_messages():
         await Messagesx.delete_old_messages(cutoff_timestamp_iso)
 
 
-BOT_VERSION = "1.5.0"
+BOT_VERSION = "1.6.0"
 CHANGELOG_TEXT = (
-    "📢 <b>Обновление бота (v1.5.0):</b>\n\n"
-    "• <b>Восстановление после сбоев:</b> Теперь при включении бота после технического перерыва пропущенные сообщения группируются в один компактный отчет.\n"
-    "• <b>Загрузка медиа по запросу:</b> Удаленные и измененные за время офлайна медиафайлы теперь скачиваются и присылаются только по вашему подтверждению через кнопку.\n"
-    "• <b>Подписи к медиа:</b> Описания и тексты к пропущенным медиафайлам теперь прикрепляются прямо к самим файлам при выгрузке."
+    "📢 <b>Обновление бота (v1.6.0):</b>\n\n"
+    "• <b>Создание зеркал в 1 клик:</b> Теперь прямо через меню бота вы можете развернуть собственную копию на бесплатном сервере Render.\n"
+    "• <b>Авто-пинг (Self-ping):</b> Все новые зеркала будут автоматически пинговать себя каждые 5 минут, предотвращая засыпание сервера без использования UptimeRobot.\n"
+    "• <b>Личный режим:</b> Добавлено пояснение об ограничении доступа к зеркалу при указании USER_ID."
 )
 
 
@@ -929,7 +929,8 @@ def get_settings_keyboard(user_id: int, settings: dict) -> types.InlineKeyboardM
 @router.message(Command(commands=["start"]))
 async def start_command(message: types.Message):
     kb = [
-        [types.KeyboardButton(text="🛡️ Безопасность и хостинг"), types.KeyboardButton(text="⚙️ Настройки")]
+        [types.KeyboardButton(text="🪞 Создать зеркало"), types.KeyboardButton(text="🛡️ Безопасность и хостинг")],
+        [types.KeyboardButton(text="⚙️ Настройки")]
     ]
     keyboard = types.ReplyKeyboardMarkup(
         keyboard=kb,
@@ -1015,6 +1016,32 @@ async def security_info_handler(message: types.Message):
         "https://github.com/Claxy-mod/Free-spy"
     )
     await message.answer(info_text, parse_mode="html", disable_web_page_preview=True)
+
+
+@router.message(F.text == "🪞 Создать зеркало")
+async def create_mirror_handler(message: types.Message):
+    mirror_text = (
+        "🪞 <b>Создание личного зеркала бота</b>\n\n"
+        "Вы можете развернуть собственную независимую копию бота на бесплатных серверах Render. "
+        "Вся переписка будет храниться <b>только в вашей личной базе данных</b> и аппаратно шифроваться. "
+        "Если при установке вы укажете свой USER_ID, бот будет работать <b>исключительно у вас</b> (другие люди не смогут им воспользоваться).\n\n"
+        "<b>Шаги для запуска (займет 2 минуты):</b>\n"
+        "1. Перейдите в @BotFather и создайте нового бота (команда <code>/newbot</code>).\n"
+        "2. Скопируйте полученный токен.\n"
+        "3. Нажмите на кнопку ниже, чтобы открыть страницу автоматического создания сервера.\n"
+        "4. Зарегистрируйтесь на Render (если нет аккаунта) и вставьте токен в поле <code>BOT_TOKEN</code>.\n"
+        f"5. В поле <code>USER_ID</code> укажите ваш ID: <code>{message.from_user.id}</code>\n\n"
+        "✨ <b>Всё остальное</b> (PostgreSQL, генерация ключей, запуск кода) <b>настроится полностью автоматически!</b>"
+    )
+    
+    inline_kb = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [types.InlineKeyboardButton(text="🚀 Развернуть на Render (Бесплатно)", url="https://render.com/deploy?repo=https://github.com/Claxy-mod/Free-spy")]
+        ]
+    )
+    
+    await message.answer(mirror_text, parse_mode="html", reply_markup=inline_kb)
+
 
 # Startup missed updates buffering system
 IS_BOOTING = True
