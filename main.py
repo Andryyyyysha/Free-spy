@@ -447,6 +447,19 @@ class UserSettingsDB:
                         res["delete_reply"] = 1
                     return res
                 else:
+                    cursor = conn.cursor()
+                    if DATABASE_URL:
+                        cursor.execute(
+                            "INSERT INTO user_settings (user_id, notify_updates, notify_startup, delete_reply) "
+                            "VALUES (%s, 1, 1, 1) ON CONFLICT (user_id) DO NOTHING",
+                            [user_id]
+                        )
+                    else:
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO user_settings (user_id, notify_updates, notify_startup, delete_reply) "
+                            "VALUES (?, 1, 1, 1)",
+                            [user_id]
+                        )
                     return {"user_id": user_id, "notify_updates": 1, "notify_startup": 1, "delete_reply": 1}
         return await asyncio.to_thread(_sync)
 
@@ -473,6 +486,16 @@ class UserSettingsDB:
                         [value, user_id]
                     )
         await asyncio.to_thread(_sync)
+
+    @staticmethod
+    async def get_all_user_ids() -> list[int]:
+        def _sync():
+            with db_session() as conn:
+                cursor = get_db_cursor(conn)
+                cursor.execute("SELECT user_id FROM user_settings")
+                rows = cursor.fetchall()
+                return [row['user_id'] for row in rows]
+        return await asyncio.to_thread(_sync)
 
 
 async def cleanup_old_messages():
@@ -560,7 +583,7 @@ async def check_and_broadcast_changelog(bot: Bot):
     # 3. If it was a cold start (downtime > 15 mins), notify regular users
     if not is_restart:
         logger.info("Cold start detected. Notifying users about bot recovery...")
-        user_ids = await ConnectionsDB.get_all_user_ids()
+        user_ids = await UserSettingsDB.get_all_user_ids()
             
         if user_ids:
             for uid in user_ids:
@@ -580,7 +603,7 @@ async def check_and_broadcast_changelog(bot: Bot):
         if last_broadcasted != BOT_VERSION:
             logger.info(f"Broadcasting changelog for version {BOT_VERSION}...")
             
-            user_ids = await ConnectionsDB.get_all_user_ids()
+            user_ids = await UserSettingsDB.get_all_user_ids()
                 
             if user_ids:
                 success_count = 0
@@ -819,8 +842,8 @@ async def broadcast_command(message: types.Message, bot: Bot):
             return
         broadcast_text = args[1]
 
-    # Fetch all unique user IDs from connections table
-    user_ids = await ConnectionsDB.get_all_user_ids()
+    # Fetch all unique user IDs from user_settings table
+    user_ids = await UserSettingsDB.get_all_user_ids()
 
     if not user_ids:
         await message.answer("В базе данных нет зарегистрированных пользователей для рассылки.")
@@ -912,6 +935,8 @@ async def start_command(message: types.Message):
         "• Настройка оповещений об обновлениях бота и статусе его работы.\n\n"
         "Исходный код проекта доступен на <a href='https://github.com/Claxy-mod/Free-spy'>GitHub</a>."
     )
+    # Register user in settings DB on start
+    await UserSettingsDB.get_settings(message.from_user.id)
     await message.answer(
         start_text,
         parse_mode='html',
