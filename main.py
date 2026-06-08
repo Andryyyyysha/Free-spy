@@ -1515,6 +1515,27 @@ async def stop_web_server():
         await web_runner.cleanup()
 
 
+async def self_ping():
+    """Фоновая задача для предотвращения засыпания сервера на Render (авто-пинг)"""
+    import aiohttp
+    
+    external_url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not external_url:
+        return
+        
+    while True:
+        try:
+            # Ping every 5 minutes to keep Render instance awake
+            await asyncio.sleep(5 * 60)
+            async with aiohttp.ClientSession() as session:
+                async with session.get(external_url) as response:
+                    logger.info(f"Self-ping to {external_url}: {response.status}")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Self-ping error: {e}")
+
+
 async def on_startup(bot: Bot):
     global LAST_STARTUP_UPDATE_TIME
     LAST_STARTUP_UPDATE_TIME = asyncio.get_event_loop().time()
@@ -1551,6 +1572,10 @@ async def on_startup(bot: Bot):
     background_tasks.add(task_cleanup)
     task_cleanup.add_done_callback(background_tasks.discard)
 
+    # Self-ping for Render
+    task_ping = asyncio.create_task(self_ping())
+    background_tasks.add(task_ping)
+    task_ping.add_done_callback(background_tasks.discard)
 
 async def on_shutdown(bot: Bot):
     logger.info("Shutdown initiated. Canceling background tasks...")
