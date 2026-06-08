@@ -37,6 +37,17 @@ if not ENCRYPTION_KEY:
     ENCRYPTION_KEY = Fernet.generate_key().decode()
     logging.warning("ENCRYPTION_KEY is not set! Generated a temporary key for this session. Messages won't be readable after bot restarts.")
 
+# Validate and format key for Fernet compatibility
+try:
+    Fernet(ENCRYPTION_KEY.encode())
+except Exception:
+    import base64
+    import hashlib
+    logging.info("Hashing ENCRYPTION_KEY to derive a valid 32-byte Fernet key...")
+    key_bytes = ENCRYPTION_KEY.encode()
+    hash_bytes = hashlib.sha256(key_bytes).digest()
+    ENCRYPTION_KEY = base64.urlsafe_b64encode(hash_bytes).decode()
+
 cipher_suite = Fernet(ENCRYPTION_KEY.encode())
 
 
