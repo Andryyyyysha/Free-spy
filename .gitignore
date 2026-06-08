@@ -17,3 +17,7 @@ ENV/
 build/
 dist/
 *.egg-info/
+
+# Local test environment
+test/
+
