@@ -1637,7 +1637,7 @@ async def main() -> None:
     dp.shutdown.register(on_shutdown)
     
     await bot.delete_webhook(drop_pending_updates=False)
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, handle_as_tasks=False)
 
 
 if __name__ == "__main__":
