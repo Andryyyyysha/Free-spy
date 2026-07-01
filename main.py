@@ -1614,6 +1614,13 @@ async def raw_update_middleware(handler, event: Update, data):
         logger.info(f"   ↳ Deleted Business Messages: Chat={del_ev.chat.id}, IDs={del_ev.message_ids}")
     return await handler(event, data)
 
+@dp.message(lambda msg: msg.text and msg.text.lower() in ["/ping", "!пинг", "пинг"])
+async def cmd_ping_private(message: Message):
+    await message.reply("🏓 **Понг!**\n\nБот на связи, скрипт работает исправно, базы данных Supabase и хостинг Amvera активны. ✅")
+
+@dp.business_message(lambda msg: msg.text and msg.text.lower() in ["/ping", "!пинг", "пинг"])
+async def cmd_ping_business(message: Message):
+    await message.reply("🏓 **Понг!**\n\nБот-шпион активен в этом бизнес-чате и логирует изменения. ✅")
 
 async def main() -> None:
     # Initialize connection pool if using PostgreSQL
