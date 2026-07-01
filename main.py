@@ -1632,11 +1632,11 @@ async def main() -> None:
     
     @dp.message(lambda msg: msg.text and msg.text.lower() in ["/ping", "!пинг", "пинг"])
     async def cmd_ping_private(message: Message):
-    await message.reply("🏓 **Понг!**\n\nБот на связи, скрипт работает исправно, базы данных Supabase и хостинг Amvera активны. ✅")
+        await message.reply("🏓 **Понг!**\n\nБот на связи, скрипт работает исправно, базы данных Supabase и хостинг Amvera активны. ✅")
 
     @dp.business_message(lambda msg: msg.text and msg.text.lower() in ["/ping", "!пинг", "пинг"])
     async def cmd_ping_business(message: Message):
-    await message.reply("🏓 **Понг!**\n\nБот-шпион активен в этом бизнес-чате и логирует изменения. ✅")
+        await message.reply("🏓 **Понг!**\n\nБот-шпион активен в этом бизнес-чате и логирует изменения. ✅")
    
     dp.update.outer_middleware(raw_update_middleware)
     dp.include_router(router)
