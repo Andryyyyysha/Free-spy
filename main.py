@@ -1501,7 +1501,8 @@ async def business_message(message: types.Message):
             file_id = message.animation.file_id
             
         if file_id:
-            asyncio.create_task(download_media(message.bot, file_id))
+            asyncio.create_task(download_media(message.bot, file_id, media_type))
+
 
         message_datetime_utc = message.date.replace(tzinfo=timezone.utc)
         timestamp_iso = message_datetime_utc.isoformat()
