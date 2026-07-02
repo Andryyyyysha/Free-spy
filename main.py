@@ -1642,21 +1642,35 @@ async def main() -> None:
                 
             unique_id = data_parts[1]
             
-            with db_pool.connection() as conn:
-                with conn.cursor() as cursor:
+            def _fetch_photo():
+                with db_session() as conn:
+                    cursor = get_db_cursor(conn)
                     cursor.execute("SELECT file_id FROM messages WHERE file_id LIKE %s ORDER BY id DESC LIMIT 1", [f"%{unique_id}%"])
-                    row = cursor.fetchone()
-            
-            if row and row[0]:
+                    return cursor.fetchone()
+
+            row = await asyncio.to_thread(_fetch_photo)
+
+            file_id = None
+            if row:
+                try:
+                    # Работает и для RealDictCursor (Supabase), и для sqlite3.Row
+                    file_id = row["file_id"]
+                except Exception:
+                    # На случай, если пришел обычный кортеж (tuple)
+                    file_id = row
+
+
+            if file_id:
                 await callback_query.bot.send_photo(
                     callback_query.from_user.id, 
-                    photo=row[0], 
+                    photo=file_id, 
                     caption="ℹ️ **Оригинальное качество с серверов Telegram**"
                 )
                 await callback_query.answer()
             else:
                 await callback_query.answer("Оригинал еще не записался в базу данных или уже удален.", show_alert=True)
         except Exception as e:
+            logger.error(f"Ошибка при отправке оригинального фото: {e}")
             await callback_query.answer(f"Не удалось открыть: {e}", show_alert=True)
 
     dp.update.outer_middleware(raw_update_middleware)
