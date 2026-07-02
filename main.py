@@ -694,23 +694,6 @@ async def _send_media_with_fallback(
             await bot.send_message(recipient_id, msg, parse_mode='html')
         except Exception as send_err:
             logger.error(f"Failed to send backup message: {send_err}")
-                await bot.send_photo(recipient_id, photo=media_val)
-            elif media_type == "video":
-                await bot.send_video(recipient_id, video=media_val)
-            elif media_type == "voice":
-                await bot.send_voice(recipient_id, voice=media_val)
-            elif media_type == "video_note":
-                await bot.send_video_note(recipient_id, video_note=media_val)
-            elif media_type == "document":
-                await bot.send_document(recipient_id, document=media_val)
-            elif media_type == "audio":
-                await bot.send_audio(recipient_id, audio=media_val)
-            elif media_type == "sticker":
-                await bot.send_sticker(recipient_id, sticker=media_val)
-            elif media_type == "animation":
-                await bot.send_animation(recipient_id, animation=media_val)
-        except Exception as e2:
-            logger.error(f"Fallback media sending also failed: {e2}")
 
 
 async def send_msg(
