@@ -659,7 +659,12 @@ async def _send_media_with_fallback(
 ):
     try:
         if media_type == "photo":
-            await bot.send_photo(recipient_id, photo=media_val, caption=msg, parse_mode='html')
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+            # Кнопка передает команду и уникальный ID файла для пересылки
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🖼 Посмотреть оригинал", callback_data=f"orig_photo:{media_val.file_unique_id if hasattr(media_val, 'file_unique_id') else ''}")]
+            ])
+            await bot.send_photo(recipient_id, photo=media_val, caption=msg, parse_mode='html', reply_markup=kb)
         elif media_type == "video":
             await bot.send_video(recipient_id, video=media_val, caption=msg, parse_mode='html')
         elif media_type == "voice":
@@ -1638,6 +1643,31 @@ async def main() -> None:
     async def cmd_ping_business(message):
         await message.reply("🏓 **Понг!**\n\nБот-шпион активен в этом бизнес-чате и логирует изменения. ✅")
    
+    @dp.callback_query(lambda c: c.data and c.data.startswith("orig_photo:"))
+    async def send_original_photo(callback_query):
+        data_parts = callback_query.data.split(":")
+        if len(data_parts) < 2 or not data_parts[1]:
+            await callback_query.answer("Не удалось получить уникальный ID файла.", show_alert=True)
+            return
+            
+        unique_id = data_parts[1]
+        try:
+            with db_pool.connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT file_id FROM messages WHERE file_id LIKE %s OR file_id = %s ORDER BY id DESC LIMIT 1", [f"%{unique_id}%", unique_id])
+                    row = cursor.fetchone()
+            
+            if row and row[0]:
+                await callback_query.bot.send_photo(
+                    callback_query.from_user.id, 
+                    photo=row[0], 
+                    caption="ℹ️ **Оригинальное качество с серверов Telegram**"
+                )
+                await callback_query.answer()
+            else:
+                await callback_query.answer("Оригинал еще не записался в базу данных или уже удален.", show_alert=True)
+        except Exception as e:
+            await callback_query.answer(f"Ошибка загрузки оригинала: {e}", show_alert=True)
     dp.update.outer_middleware(raw_update_middleware)
     dp.include_router(router)
     
