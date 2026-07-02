@@ -1624,57 +1624,50 @@ async def main() -> None:
     bot = Bot(token=TOKEN)
     dp = Dispatcher()
     
-    @dp.message(lambda msg: msg.text and msg.text.lower() in ["/ping", "!пинг", "пинг"])
-    async def cmd_ping_private(message):
-        await message.reply("🏓 **Понг!**\n\nБот на связи, скрипт работает исправно, базы данных Supabase и хостинг Amvera активны. ✅")
+   @dp.message(lambda msg: msg.text and msg.text.lower() in ["/ping", "!пинг", "пинг"])
+async def cmd_ping_private(message):
+    await message.reply("🏓 **Понг!**\n\nБот на связи, скрипт работает исправно, базы данных Supabase и хостинг Amvera активны. ✅")
 
-    @dp.business_message(lambda msg: msg.text and msg.text.lower() in ["/ping", "!пинг", "пинг"])
-    async def cmd_ping_business(message):
-        await message.reply("🏓 **Понг!**\n\nБот-шпион активен в этом бизнес-чате и логирует изменения. ✅")
-   
-       @dp.callback_query(lambda c: c.data and c.data.startswith("orig:"))
-    async def send_original_photo(callback_query):
-        try:
-            data_parts = callback_query.data.split(":", 1)
-            if len(data_parts) < 2 or not data_parts[1]:
-                await callback_query.answer("Не удалось прочитать ID файла.", show_alert=True)
-                return
-                
-            unique_id = data_parts[1]
+@dp.business_message(lambda msg: msg.text and msg.text.lower() in ["/ping", "!пинг", "пинг"])
+async def cmd_ping_business(message):
+    await message.reply("🏓 **Понг!**\n\nБот-шпион активен в этом бизнес-чате и логирует изменения. ✅")
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("orig:"))
+async def send_original_photo(callback_query):
+    try:
+        data_parts = callback_query.data.split(":", 1)
+        if len(data_parts) < 2 or not data_parts[1]:
+            await callback_query.answer("Не удалось прочитать ID файла.", show_alert=True)
+            return
             
-            with db_pool.connection() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute("SELECT file_id FROM messages WHERE file_id LIKE %s ORDER BY id DESC LIMIT 1", [f"%{unique_id}%"])
-                    row = cursor.fetchone()
-            
-            if row and row[0]:
-                await callback_query.bot.send_photo(
-                    callback_query.from_user.id, 
-                    photo=row[0], 
-                    caption="ℹ️ **Оригинальное качество с серверов Telegram**"
-                )
-                await callback_query.answer()
-            else:
-                await callback_query.answer("Оригинал еще не записался в базу данных или уже удален.", show_alert=True)
-        except Exception as e:
-            await callback_query.answer(f"Не удалось открыть: {e}", show_alert=True)
+        unique_id = data_parts[1]
+        
+        with db_pool.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT file_id FROM messages WHERE file_id LIKE %s ORDER BY id DESC LIMIT 1", [f"%{unique_id}%"])
+                row = cursor.fetchone()
+        
+        if row and row[0]:
+            await callback_query.bot.send_photo(
+                callback_query.from_user.id, 
+                photo=row[0], 
+                caption="ℹ️ **Оригинальное качество с серверов Telegram**"
+            )
+            await callback_query.answer()
+        else:
+            await callback_query.answer("Оригинал еще не записался в базу данных или уже удален.", show_alert=True)
+       except Exception as e:
+        await callback_query.answer(f"Не удалось открыть: {e}", show_alert=True)
 
-    dp.update.outer_middleware(raw_update_middleware)
-    dp.include_router(router)
-    
-    # Register lifecycle hooks
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
-    
-    await bot.delete_webhook(drop_pending_updates=False)
-    
-    # Запуск с фильтрацией только нужных обновлений (бизнес-сообщения, изменения и удаления)
-    await dp.start_polling(
-        bot, 
-        allowed_updates=["message", "business_message", "edited_business_message", "deleted_business_messages"], 
-        handle_as_tasks=False
-    )
+dp.update.outer_middleware(raw_update_middleware)
+dp.include_router(router)
 
+# Далее идут оригинальные регистры хуков автора, delete_webhook и start_polling:
+dp.startup.register(on_startup)
+dp.shutdown.register(on_shutdown)
+
+await bot.delete_webhook(drop_pending_updates=False)
+await dp.start_polling(bot, allowed_updates=[...], handle_as_tasks=False)
 
 if __name__ == "__main__":
     asyncio.run(main())
