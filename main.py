@@ -1355,7 +1355,7 @@ async def deleted_business_messages(event: types.BusinessMessagesDeleted, bot: B
 
         user_fullname_escaped = escape(user_fullname)
         if username:
-            user_fullname_escaped = f'<a href="https://t.me{username}">{user_fullname_escaped}</a>'
+            user_fullname_escaped = f'<a href="https://t.me/{username}">{user_fullname_escaped}</a>'
 
         timestamp_str = user_msg.timestamp or ""
 
