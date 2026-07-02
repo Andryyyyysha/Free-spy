@@ -125,37 +125,6 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, force=True)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-async def download_media(bot: Bot, file_id: str, media_type: str) -> Union[str, None]:
-    try:
-        downloads_dir = os.path.join(BASE_DIR, "downloads")
-        os.makedirs(downloads_dir, exist_ok=True)
-        
-        file = await bot.get_file(file_id)
-        if not file or not file.file_path:
-            return None
-            
-        ext = os.path.splitext(file.file_path)[1]
-        if not ext:
-            if media_type == "photo":
-                ext = ".jpg"
-            elif media_type == "voice":
-                ext = ".ogg"
-            elif media_type == "video":
-                ext = ".mp4"
-            elif media_type == "sticker":
-                ext = ".webp"
-            else:
-                ext = ".bin"
-                
-        local_filename = f"{file_id}{ext}"
-        local_path = os.path.join(downloads_dir, local_filename)
-        
-        await bot.download_file(file.file_path, local_path)
-        return local_path
-    except Exception as e:
-        logger.error(f"Failed to download media {file_id}: {e}")
-        return None
-
 
 
 def get_db_cursor(conn):
@@ -691,14 +660,9 @@ async def _send_media_with_fallback(
     try:
         if media_type == "photo":
             from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-            # Безопасно извлекаем ID для кнопки, чтобы уложиться в лимит 64 символа Telegram
-            f_id = media_val if isinstance(media_val, str) else (media_val.file_id if hasattr(media_val, 'file_id') else '')
-            # Если это локальный файл FSInputFile, у него нет file_id, берем его из локальных переменных
-            if not f_id and 'file_id' in locals():
-                f_id = locals()['file_id']
-                
+            # Кнопка передает команду и уникальный ID файла для пересылки
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🖼 Посмотреть оригинал", callback_data=f"orig:{str(f_id)[:40]}")]
+                [InlineKeyboardButton(text="🖼 Посмотреть оригинал", callback_data=f"orig_photo:{media_val.file_unique_id if hasattr(media_val, 'file_unique_id') else ''}")]
             ])
             await bot.send_photo(recipient_id, photo=media_val, caption=msg, parse_mode='html', reply_markup=kb)
         elif media_type == "video":
@@ -723,8 +687,24 @@ async def _send_media_with_fallback(
         logger.error(f"Failed to send media with caption: {e}")
         try:
             await bot.send_message(recipient_id, msg, parse_mode='html')
-        except Exception as send_err:
-            logger.error(f"Failed to send backup message: {send_err}")
+            if media_type == "photo":
+                await bot.send_photo(recipient_id, photo=media_val)
+            elif media_type == "video":
+                await bot.send_video(recipient_id, video=media_val)
+            elif media_type == "voice":
+                await bot.send_voice(recipient_id, voice=media_val)
+            elif media_type == "video_note":
+                await bot.send_video_note(recipient_id, video_note=media_val)
+            elif media_type == "document":
+                await bot.send_document(recipient_id, document=media_val)
+            elif media_type == "audio":
+                await bot.send_audio(recipient_id, audio=media_val)
+            elif media_type == "sticker":
+                await bot.send_sticker(recipient_id, sticker=media_val)
+            elif media_type == "animation":
+                await bot.send_animation(recipient_id, animation=media_val)
+        except Exception as e2:
+            logger.error(f"Fallback media sending also failed: {e2}")
 
 
 async def send_msg(
@@ -1302,97 +1282,74 @@ async def deleted_business_messages(event: types.BusinessMessagesDeleted, bot: B
     user_id = event.chat.id
     user_fullname = event.chat.full_name
     username = event.chat.username
-    
     recipient_id = await ConnectionsDB.get_user_id(event.business_connection_id)
     if not recipient_id:
         return
-
-    # Функция параллельной обработки одного сообщения
-    async def process_single_message_deletion(msg_id):
+    for msg_id in event.message_ids:
         user_msg = await MessageStore.get(user_id=user_id, message_id=msg_id)
         if not user_msg:
+            # Retry up to 10 times with 0.1s sleep to handle concurrent insert/delete race condition
             for _ in range(10):
                 await asyncio.sleep(0.1)
                 user_msg = await MessageStore.get(user_id=user_id, message_id=msg_id)
                 if user_msg:
                     break
-
-@router.deleted_business_messages()
-async def deleted_business_messages(event: types.BusinessMessagesDeleted, bot: Bot):
-    logger.info(f"Received deleted business messages event: Chat={event.chat.id}, IDs={event.message_ids}")
-    user_id = event.chat.id
-    user_fullname = event.chat.full_name
-    username = event.chat.username
-    
-    recipient_id = await ConnectionsDB.get_user_id(event.business_connection_id)
-    if not recipient_id:
-        return
-
-    # Внутренняя функция (отступ 4 пробела)
-    async def process_single_message_deletion(msg_id):
-        user_msg = await MessageStore.get(user_id=user_id, message_id=msg_id)
-        if not user_msg:
-            for _ in range(10):
-                await asyncio.sleep(0.1)
-                user_msg = await MessageStore.get(user_id=user_id, message_id=msg_id)
-                if user_msg:
-                    break
-                    
-        if not user_msg:
-            return
-
-        # Все эти строки теперь имеют правильный отступ в 8 пробелов!
-        old_text = decrypt_text(user_msg.message_text) if user_msg.message_text else None
-        media_type = user_msg.media_type if user_msg.media_type else "text"
-        file_id = user_msg.file_id
-
-        media_names = {
-            "text": "сообщения", "photo": "фотографии", "video": "видео",
-            "voice": "голосового сообщения", "audio": "аудио",
-            "document": "документа", "sticker": "стикера", "video_note": "кружочка"
-        }
-        media_name = media_names.get(media_type, "сообщения")
-
-        user_fullname_escaped = escape(user_fullname)
-        if username:
-            user_fullname_escaped = f'<a href="https://t.me/{username}">{user_fullname_escaped}</a>'
-
-        timestamp_str = user_msg.timestamp or ""
-
-        if file_id and os.path.exists(file_id):
-            def _delete_file():
-                try:
-                    os.remove(file_id)
-                    logger.info(f"Deleted local file after deletion: {file_id}")
-                except Exception as fe:
-                    logger.error(f"Failed to delete local file {file_id}: {fe}")
-            
-            await asyncio.to_thread(_delete_file)
-
-        try:
-            if old_text:
-                text = DELETED_MESSAGE_FORMAT.format(
-                    media_name=media_name, user_fullname_escaped=user_fullname_escaped,
-                    user_id=user_id, timestamp=timestamp_str, old_text=escape(old_text)
-                )
-                await bot.send_message(chat_id=recipient_id, text=text, parse_mode="HTML", disable_web_page_preview=True)
+        if user_msg:
+            message_timestamp = datetime.fromisoformat(user_msg.timestamp).astimezone(timezone_local)
+            timestamp_formatted = message_timestamp.strftime('%d/%m/%y %H:%M')
+            if IS_BOOTING:
+                MISSED_UPDATES_BUFFER.append({
+                    "type": "delete",
+                    "recipient_id": recipient_id,
+                    "user_fullname": user_fullname,
+                    "user_id": user_id,
+                    "username": username,
+                    "timestamp": timestamp_formatted,
+                    "media_type": user_msg.media_type,
+                    "file_id": user_msg.file_id,
+                    "old_text": user_msg.message_text
+                })
             else:
-                text = DELETED_MESSAGE_NO_CONTENT_FORMAT.format(
-                    media_name=media_name, user_fullname_escaped=user_fullname_escaped,
-                    user_id=user_id, timestamp=timestamp_str
+                await send_msg(
+                    message_old=user_msg.message_text,
+                    message_new=None,
+                    user_fullname=user_fullname,
+                    user_id=user_id,
+                    timestamp=timestamp_formatted,
+                    recipient_id=recipient_id,
+                    username=username,
+                    media_type=user_msg.media_type,
+                    file_id=user_msg.file_id,
+                    bot=bot
                 )
-                await bot.send_message(chat_id=recipient_id, text=text, parse_mode="HTML", disable_web_page_preview=True)
-        except Exception as se:
-            logger.error(f"Failed to send deletion notification to admin {recipient_id}: {se}")
+                if user_msg.file_id:
+                    import glob
+                    downloads_dir = os.path.join(BASE_DIR, "downloads")
+                    files = glob.glob(os.path.join(downloads_dir, f"{user_msg.file_id}.*"))
+                    for f in files:
+                        try:
+                            os.remove(f)
+                            logger.info(f"Deleted local file after deletion: {f}")
+                        except Exception as e:
+                            logger.warning(f"Failed to delete local file {f}: {e}")
+            await MessageStore.delete(user_id=user_id, message_id=msg_id)
 
-    # Запуск параллельной обработки (отступ 4 пробела)
-    semaphore = asyncio.Semaphore(2)
 
-    async def sem_process(msg_id):
-        async with semaphore:
-            await process_single_message_deletion(msg_id)
-
-    await asyncio.gather(*(sem_process(msg_id) for msg_id in event.message_ids))
+async def download_media(bot: Bot, file_id: str) -> Union[str, None]:
+    try:
+        file_info = await bot.get_file(file_id)
+        ext = os.path.splitext(file_info.file_path)[1] or ""
+        downloads_dir = os.path.join(BASE_DIR, "downloads")
+        os.makedirs(downloads_dir, exist_ok=True)
+        local_path = os.path.join(downloads_dir, f"{file_id}{ext}")
+        if os.path.exists(local_path):
+            return local_path
+        await bot.download_file(file_info.file_path, local_path)
+        logger.info(f"Successfully downloaded media: {local_path}")
+        return local_path
+    except Exception as e:
+        logger.error(f"Failed to download media {file_id}: {e}")
+        return None
 
 
 @router.business_message()
@@ -1519,8 +1476,7 @@ async def business_message(message: types.Message):
             file_id = message.animation.file_id
             
         if file_id:
-            asyncio.create_task(download_media(message.bot, file_id, media_type))
-
+            asyncio.create_task(download_media(message.bot, file_id))
 
         message_datetime_utc = message.date.replace(tzinfo=timezone.utc)
         timestamp_iso = message_datetime_utc.isoformat()
@@ -1678,7 +1634,7 @@ async def main() -> None:
 
     bot = Bot(token=TOKEN)
     dp = Dispatcher()
-
+    
     @dp.message(lambda msg: msg.text and msg.text.lower() in ["/ping", "!пинг", "пинг"])
     async def cmd_ping_private(message):
         await message.reply("🏓 **Понг!**\n\nБот на связи, скрипт работает исправно, базы данных Supabase и хостинг Amvera активны. ✅")
@@ -1686,48 +1642,32 @@ async def main() -> None:
     @dp.business_message(lambda msg: msg.text and msg.text.lower() in ["/ping", "!пинг", "пинг"])
     async def cmd_ping_business(message):
         await message.reply("🏓 **Понг!**\n\nБот-шпион активен в этом бизнес-чате и логирует изменения. ✅")
-
-    @dp.callback_query(lambda c: c.data and c.data.startswith("orig:"))
+   
+    @dp.callback_query(lambda c: c.data and c.data.startswith("orig_photo:"))
     async def send_original_photo(callback_query):
-        try:
-            data_parts = callback_query.data.split(":", 1)
-            if len(data_parts) < 2 or not data_parts[1]:
-                await callback_query.answer("Не удалось прочитать ID файла.", show_alert=True)
-                return
-                
-            unique_id = data_parts[1]
+        data_parts = callback_query.data.split(":")
+        if len(data_parts) < 2 or not data_parts[1]:
+            await callback_query.answer("Не удалось получить уникальный ID файла.", show_alert=True)
+            return
             
-            def _fetch_photo():
-                with db_session() as conn:
-                    cursor = get_db_cursor(conn)
-                    cursor.execute("SELECT file_id FROM messages WHERE file_id LIKE %s ORDER BY id DESC LIMIT 1", [f"%{unique_id}%"])
-                    return cursor.fetchone()
-
-            row = await asyncio.to_thread(_fetch_photo)
-
-            file_id = None
-            if row:
-                try:
-                    # Работает и для RealDictCursor (Supabase), и для sqlite3.Row
-                    file_id = row["file_id"]
-                except Exception:
-                    # На случай, если пришел обычный кортеж (tuple)
-                    file_id = row
-
-
-            if file_id:
+        unique_id = data_parts[1]
+        try:
+            with db_pool.connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT file_id FROM messages WHERE file_id LIKE %s OR file_id = %s ORDER BY id DESC LIMIT 1", [f"%{unique_id}%", unique_id])
+                    row = cursor.fetchone()
+            
+            if row and row[0]:
                 await callback_query.bot.send_photo(
                     callback_query.from_user.id, 
-                    photo=file_id, 
+                    photo=row[0], 
                     caption="ℹ️ **Оригинальное качество с серверов Telegram**"
                 )
                 await callback_query.answer()
             else:
                 await callback_query.answer("Оригинал еще не записался в базу данных или уже удален.", show_alert=True)
         except Exception as e:
-            logger.error(f"Ошибка при отправке оригинального фото: {e}")
-            await callback_query.answer(f"Не удалось открыть: {e}", show_alert=True)
-
+            await callback_query.answer(f"Ошибка загрузки оригинала: {e}", show_alert=True)
     dp.update.outer_middleware(raw_update_middleware)
     dp.include_router(router)
     
