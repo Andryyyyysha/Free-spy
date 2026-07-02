@@ -1336,9 +1336,9 @@ async def deleted_business_messages(event: types.BusinessMessagesDeleted, bot: B
         # Форматируем имя пользователя
         user_fullname_escaped = escape(user_fullname)
         if username:
-            user_fullname_escaped = f'<a href="https://t.me{username}">{user_fullname_escaped}</a>'
+            user_fullname_escaped = f'<a href="https://t.me/{username}">{user_fullname_escaped}</a>'
 
-        timestamp_str = user_msg.get("timestamp", "")
+        timestamp_str = user_msg.timestamp if user_msg.timestamp else ""
 
         if file_id and os.path.exists(file_id):
             def _delete_file():
@@ -1367,8 +1367,15 @@ async def deleted_business_messages(event: types.BusinessMessagesDeleted, bot: B
             logger.error(f"Failed to send deletion notification to admin {recipient_id}: {se}")
 
 
-    # Запускаем обработку всех удаленных сообщений пачкой одновременно
-    await asyncio.gather(*(process_single_message_deletion(msg_id) for msg_id in event.message_ids))
+        # Ограничиваем одновременность до 2 задач, чтобы сберечь RAM на Amvera
+        semaphore = asyncio.Semaphore(2)
+
+        async def sem_process(msg_id):
+            async with semaphore:
+                await process_single_message_deletion(msg_id)
+
+        await asyncio.gather(*(sem_process(msg_id) for msg_id in event.message_ids))
+
 
 @router.business_message()
 async def business_message(message: types.Message):
