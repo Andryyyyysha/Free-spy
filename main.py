@@ -125,6 +125,37 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, force=True)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+async def download_media(bot: Bot, file_id: str, media_type: str) -> Union[str, None]:
+    try:
+        downloads_dir = os.path.join(BASE_DIR, "downloads")
+        os.makedirs(downloads_dir, exist_ok=True)
+        
+        file = await bot.get_file(file_id)
+        if not file or not file.file_path:
+            return None
+            
+        ext = os.path.splitext(file.file_path)[1]
+        if not ext:
+            if media_type == "photo":
+                ext = ".jpg"
+            elif media_type == "voice":
+                ext = ".ogg"
+            elif media_type == "video":
+                ext = ".mp4"
+            elif media_type == "sticker":
+                ext = ".webp"
+            else:
+                ext = ".bin"
+                
+        local_filename = f"{file_id}{ext}"
+        local_path = os.path.join(downloads_dir, local_filename)
+        
+        await bot.download_file(file.file_path, local_path)
+        return local_path
+    except Exception as e:
+        logger.error(f"Failed to download media {file_id}: {e}")
+        return None
+
 
 
 def get_db_cursor(conn):
