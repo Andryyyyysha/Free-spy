@@ -1271,75 +1271,73 @@ async def deleted_business_messages(event: types.BusinessMessagesDeleted, bot: B
     user_id = event.chat.id
     user_fullname = event.chat.full_name
     username = event.chat.username
+    
     recipient_id = await ConnectionsDB.get_user_id(event.business_connection_id)
     if not recipient_id:
         return
-    for msg_id in event.message_ids:
+
+    # Функция параллельной обработки одного сообщения
+    async def process_single_message_deletion(msg_id):
         user_msg = await MessageStore.get(user_id=user_id, message_id=msg_id)
         if not user_msg:
-            # Retry up to 10 times with 0.1s sleep to handle concurrent insert/delete race condition
             for _ in range(10):
                 await asyncio.sleep(0.1)
                 user_msg = await MessageStore.get(user_id=user_id, message_id=msg_id)
                 if user_msg:
                     break
-        if user_msg:
-            message_timestamp = datetime.fromisoformat(user_msg.timestamp).astimezone(timezone_local)
-            timestamp_formatted = message_timestamp.strftime('%d/%m/%y %H:%M')
-            if IS_BOOTING:
-                MISSED_UPDATES_BUFFER.append({
-                    "type": "delete",
-                    "recipient_id": recipient_id,
-                    "user_fullname": user_fullname,
-                    "user_id": user_id,
-                    "username": username,
-                    "timestamp": timestamp_formatted,
-                    "media_type": user_msg.media_type,
-                    "file_id": user_msg.file_id,
-                    "old_text": user_msg.message_text
-                })
-            else:
-                await send_msg(
-                    message_old=user_msg.message_text,
-                    message_new=None,
-                    user_fullname=user_fullname,
-                    user_id=user_id,
-                    timestamp=timestamp_formatted,
-                    recipient_id=recipient_id,
-                    username=username,
-                    media_type=user_msg.media_type,
-                    file_id=user_msg.file_id,
-                    bot=bot
+                    
+        if not user_msg:
+            return
+
+        # Извлекаем данные сообщения
+        old_text = decrypt_text(user_msg.get("message_text")) if user_msg.get("message_text") else None
+        media_type = user_msg.get("media_type", "text")
+        file_id = user_msg.get("file_id")
+
+        # Названия типов медиа для красивого вывода
+        media_names = {
+            "text": "сообщения", "photo": "фотографии", "video": "видео",
+            "voice": "голосового сообщения", "audio": "аудио",
+            "document": "документа", "sticker": "стикера", "video_note": "кружочка"
+        }
+        media_name = media_names.get(media_type, "сообщения")
+
+        # Форматируем имя пользователя
+        user_fullname_escaped = escape(user_fullname)
+        if username:
+            user_fullname_escaped = f'<a href="https://t.me{username}">{user_fullname_escaped}</a>'
+
+        timestamp_str = user_msg.get("timestamp", "")
+
+        if file_id and os.path.exists(file_id):
+            def _delete_file():
+                try:
+                    os.remove(file_id)
+                    logger.info(f"Deleted local file after deletion: {file_id}")
+                except Exception as fe:
+                    logger.error(f"Failed to delete local file {file_id}: {fe}")
+            
+            await asyncio.to_thread(_delete_file)
+
+        try:
+            if old_text:
+                text = DELETED_MESSAGE_FORMAT.format(
+                    media_name=media_name, user_fullname_escaped=user_fullname_escaped,
+                    user_id=user_id, timestamp=timestamp_str, old_text=escape(old_text)
                 )
-                if user_msg.file_id:
-                    import glob
-                    downloads_dir = os.path.join(BASE_DIR, "downloads")
-                    files = glob.glob(os.path.join(downloads_dir, f"{user_msg.file_id}.*"))
-                    for f in files:
-                        try:
-                            os.remove(f)
-                            logger.info(f"Deleted local file after deletion: {f}")
-                        except Exception as e:
-                            logger.warning(f"Failed to delete local file {f}: {e}")
-            await MessageStore.delete(user_id=user_id, message_id=msg_id)
+                await bot.send_message(chat_id=recipient_id, text=text, parse_mode="HTML", disable_web_page_preview=True)
+            else:
+                text = DELETED_MESSAGE_NO_CONTENT_FORMAT.format(
+                    media_name=media_name, user_fullname_escaped=user_fullname_escaped,
+                    user_id=user_id, timestamp=timestamp_str
+                )
+                await bot.send_message(chat_id=recipient_id, text=text, parse_mode="HTML", disable_web_page_preview=True)
+        except Exception as se:
+            logger.error(f"Failed to send deletion notification to admin {recipient_id}: {se}")
 
 
-async def download_media(bot: Bot, file_id: str) -> Union[str, None]:
-    try:
-        file_info = await bot.get_file(file_id)
-        ext = os.path.splitext(file_info.file_path)[1] or ""
-        downloads_dir = os.path.join(BASE_DIR, "downloads")
-        os.makedirs(downloads_dir, exist_ok=True)
-        local_path = os.path.join(downloads_dir, f"{file_id}{ext}")
-        if os.path.exists(local_path):
-            return local_path
-        await bot.download_file(file_info.file_path, local_path)
-        logger.info(f"Successfully downloaded media: {local_path}")
-        return local_path
-    except Exception as e:
-        logger.error(f"Failed to download media {file_id}: {e}")
-        return None
-
+    # Запускаем обработку всех удаленных сообщений пачкой одновременно
+    await asyncio.gather(*(process_single_message_deletion(msg_id) for msg_id in event.message_ids))
 
 @router.business_message()
 async def business_message(message: types.Message):
