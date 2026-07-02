@@ -1659,15 +1659,22 @@ async def main() -> None:
         except Exception as e:
             await callback_query.answer(f"Не удалось открыть: {e}", show_alert=True)
 
-dp.update.outer_middleware(raw_update_middleware)
-dp.include_router(router)
+    dp.update.outer_middleware(raw_update_middleware)
+    dp.include_router(router)
+    
+    # Register lifecycle hooks
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+    
+    await bot.delete_webhook(drop_pending_updates=False)
+    
+    # Запуск с фильтрацией только нужных обновлений (бизнес-сообщения, изменения и удаления)
+    await dp.start_polling(
+        bot, 
+        allowed_updates=["message", "business_message", "edited_business_message", "deleted_business_messages"], 
+        handle_as_tasks=False
+    )
 
-# Далее идут оригинальные регистры хуков автора, delete_webhook и start_polling:
-dp.startup.register(on_startup)
-dp.shutdown.register(on_shutdown)
-
-await bot.delete_webhook(drop_pending_updates=False)
-await dp.start_polling(bot, allowed_updates=[...], handle_as_tasks=False)
 
 if __name__ == "__main__":
     asyncio.run(main())
