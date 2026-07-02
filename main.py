@@ -660,9 +660,14 @@ async def _send_media_with_fallback(
     try:
         if media_type == "photo":
             from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-            # Кнопка передает команду и уникальный ID файла для пересылки
+            # Безопасно извлекаем ID для кнопки, чтобы уложиться в лимит 64 символа Telegram
+            f_id = media_val if isinstance(media_val, str) else (media_val.file_id if hasattr(media_val, 'file_id') else '')
+            # Если это локальный файл FSInputFile, у него нет file_id, берем его из локальных переменных
+            if not f_id and 'file_id' in locals():
+                f_id = locals()['file_id']
+                
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🖼 Посмотреть оригинал", callback_data=f"orig_photo:{media_val.file_unique_id if hasattr(media_val, 'file_unique_id') else ''}")]
+                [InlineKeyboardButton(text="🖼 Посмотреть оригинал", callback_data=f"orig:{str(f_id)[:40]}")]
             ])
             await bot.send_photo(recipient_id, photo=media_val, caption=msg, parse_mode='html', reply_markup=kb)
         elif media_type == "video":
@@ -687,7 +692,8 @@ async def _send_media_with_fallback(
         logger.error(f"Failed to send media with caption: {e}")
         try:
             await bot.send_message(recipient_id, msg, parse_mode='html')
-            if media_type == "photo":
+        except Exception as send_err:
+            logger.error(f"Failed to send backup message: {send_err}")
                 await bot.send_photo(recipient_id, photo=media_val)
             elif media_type == "video":
                 await bot.send_video(recipient_id, video=media_val)
@@ -1643,18 +1649,19 @@ async def main() -> None:
     async def cmd_ping_business(message):
         await message.reply("🏓 **Понг!**\n\nБот-шпион активен в этом бизнес-чате и логирует изменения. ✅")
    
-    @dp.callback_query(lambda c: c.data and c.data.startswith("orig_photo:"))
+       @dp.callback_query(lambda c: c.data and c.data.startswith("orig:"))
     async def send_original_photo(callback_query):
-        data_parts = callback_query.data.split(":")
-        if len(data_parts) < 2 or not data_parts[1]:
-            await callback_query.answer("Не удалось получить уникальный ID файла.", show_alert=True)
-            return
-            
-        unique_id = data_parts[1]
         try:
+            data_parts = callback_query.data.split(":", 1)
+            if len(data_parts) < 2 or not data_parts[1]:
+                await callback_query.answer("Не удалось прочитать ID файла.", show_alert=True)
+                return
+                
+            unique_id = data_parts[1]
+            
             with db_pool.connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("SELECT file_id FROM messages WHERE file_id LIKE %s OR file_id = %s ORDER BY id DESC LIMIT 1", [f"%{unique_id}%", unique_id])
+                    cursor.execute("SELECT file_id FROM messages WHERE file_id LIKE %s ORDER BY id DESC LIMIT 1", [f"%{unique_id}%"])
                     row = cursor.fetchone()
             
             if row and row[0]:
@@ -1667,7 +1674,8 @@ async def main() -> None:
             else:
                 await callback_query.answer("Оригинал еще не записался в базу данных или уже удален.", show_alert=True)
         except Exception as e:
-            await callback_query.answer(f"Ошибка загрузки оригинала: {e}", show_alert=True)
+            await callback_query.answer(f"Не удалось открыть: {e}", show_alert=True)
+
     dp.update.outer_middleware(raw_update_middleware)
     dp.include_router(router)
     
