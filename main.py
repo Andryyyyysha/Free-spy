@@ -1360,7 +1360,7 @@ async def business_message(message: types.Message):
             file_id = None
             if replied_msg.photo:
                 media_type = "photo"
-                file_id = replied_msg.photo[-1].file_id
+                file_id = replied_msg.photo[0].file_id
             elif replied_msg.video:
                 media_type = "video"
                 file_id = replied_msg.video.file_id
@@ -1447,7 +1447,7 @@ async def business_message(message: types.Message):
         
         if message.photo:
             media_type = "photo"
-            file_id = message.photo[-1].file_id
+            file_id = message.photo[0].file_id
         elif message.video:
             media_type = "video"
             file_id = message.video.file_id
