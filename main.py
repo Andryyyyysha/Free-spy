@@ -1316,16 +1316,36 @@ async def deleted_business_messages(event: types.BusinessMessagesDeleted, bot: B
                 user_msg = await MessageStore.get(user_id=user_id, message_id=msg_id)
                 if user_msg:
                     break
+
+@router.deleted_business_messages()
+async def deleted_business_messages(event: types.BusinessMessagesDeleted, bot: Bot):
+    logger.info(f"Received deleted business messages event: Chat={event.chat.id}, IDs={event.message_ids}")
+    user_id = event.chat.id
+    user_fullname = event.chat.full_name
+    username = event.chat.username
+    
+    recipient_id = await ConnectionsDB.get_user_id(event.business_connection_id)
+    if not recipient_id:
+        return
+
+    # Внутренняя функция (отступ 4 пробела)
+    async def process_single_message_deletion(msg_id):
+        user_msg = await MessageStore.get(user_id=user_id, message_id=msg_id)
+        if not user_msg:
+            for _ in range(10):
+                await asyncio.sleep(0.1)
+                user_msg = await MessageStore.get(user_id=user_id, message_id=msg_id)
+                if user_msg:
+                    break
                     
         if not user_msg:
             return
 
-        # Извлекаем данные сообщения через точку (ИСПРАВЛЕНО)
+        # Все эти строки теперь имеют правильный отступ в 8 пробелов!
         old_text = decrypt_text(user_msg.message_text) if user_msg.message_text else None
         media_type = user_msg.media_type if user_msg.media_type else "text"
         file_id = user_msg.file_id
 
-        # Названия типов медиа для красивого вывода
         media_names = {
             "text": "сообщения", "photo": "фотографии", "video": "видео",
             "voice": "голосового сообщения", "audio": "аудио",
@@ -1333,12 +1353,11 @@ async def deleted_business_messages(event: types.BusinessMessagesDeleted, bot: B
         }
         media_name = media_names.get(media_type, "сообщения")
 
-        # Форматируем имя пользователя
         user_fullname_escaped = escape(user_fullname)
         if username:
-            user_fullname_escaped = f'<a href="https://t.me/{username}">{user_fullname_escaped}</a>'
+            user_fullname_escaped = f'<a href="https://t.me{username}">{user_fullname_escaped}</a>'
 
-        timestamp_str = user_msg.timestamp if user_msg.timestamp else ""
+        timestamp_str = user_msg.timestamp or ""
 
         if file_id and os.path.exists(file_id):
             def _delete_file():
@@ -1366,15 +1385,14 @@ async def deleted_business_messages(event: types.BusinessMessagesDeleted, bot: B
         except Exception as se:
             logger.error(f"Failed to send deletion notification to admin {recipient_id}: {se}")
 
+    # Запуск параллельной обработки (отступ 4 пробела)
+    semaphore = asyncio.Semaphore(2)
 
-        # Ограничиваем одновременность до 2 задач, чтобы сберечь RAM на Amvera
-        semaphore = asyncio.Semaphore(2)
+    async def sem_process(msg_id):
+        async with semaphore:
+            await process_single_message_deletion(msg_id)
 
-        async def sem_process(msg_id):
-            async with semaphore:
-                await process_single_message_deletion(msg_id)
-
-        await asyncio.gather(*(sem_process(msg_id) for msg_id in event.message_ids))
+    await asyncio.gather(*(sem_process(msg_id) for msg_id in event.message_ids))
 
 
 @router.business_message()
