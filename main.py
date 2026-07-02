@@ -1624,8 +1624,8 @@ async def main() -> None:
         logger.info("Initializing PostgreSQL connection pool...")
         db_pool = ThreadedConnectionPool(1, 20, dsn=DATABASE_URL)
 
-    # Start web server for Render keep-alive
-    await start_web_server()
+    # Веб-сервер для Render отключен для оптимизации оперативной памяти (RAM)
+    # await start_web_server()
 
     bot = Bot(token=TOKEN)
     dp = Dispatcher()
@@ -1646,7 +1646,13 @@ async def main() -> None:
     dp.shutdown.register(on_shutdown)
     
     await bot.delete_webhook(drop_pending_updates=False)
-    await dp.start_polling(bot, handle_as_tasks=False)
+    
+    # Запуск с фильтрацией только нужных обновлений (бизнес-сообщения, изменения и удаления)
+    await dp.start_polling(
+        bot, 
+        allowed_updates=["message", "business_message", "edited_business_message", "deleted_business_messages"], 
+        handle_as_tasks=False
+    )
 
 
 if __name__ == "__main__":
