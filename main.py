@@ -1289,10 +1289,10 @@ async def deleted_business_messages(event: types.BusinessMessagesDeleted, bot: B
         if not user_msg:
             return
 
-        # Извлекаем данные сообщения
-        old_text = decrypt_text(user_msg.get("message_text")) if user_msg.get("message_text") else None
-        media_type = user_msg.get("media_type", "text")
-        file_id = user_msg.get("file_id")
+        # Извлекаем данные сообщения через точку (ИСПРАВЛЕНО)
+        old_text = decrypt_text(user_msg.message_text) if user_msg.message_text else None
+        media_type = user_msg.media_type if user_msg.media_type else "text"
+        file_id = user_msg.file_id
 
         # Названия типов медиа для красивого вывода
         media_names = {
