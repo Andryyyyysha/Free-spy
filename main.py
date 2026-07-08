@@ -15,6 +15,8 @@ from typing import Union, Any
 import logging
 from aiogram import Router, Bot, Dispatcher, F, types
 from aiogram.filters import Command
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiohttp import ClientTimeout
 from html import escape
 from datetime import datetime, timezone, timedelta
 import pytz
@@ -625,8 +627,9 @@ async def _send_media_with_fallback(
     try:
         if media_type == "photo":
             from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+            file_unique_id = getattr(media_val, 'file_unique_id', '')
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🖼 Посмотреть оригинал", callback_data=f"orig_photo:{media_val.file_unique_id if hasattr(media_val, 'file_unique_id') else ''}")]
+                [InlineKeyboardButton(text="🖼 Посмотреть оригинал", callback_data=f"orig_photo:{file_unique_id}")]
             ])
             await bot.send_photo(recipient_id, photo=media_val, caption=msg, parse_mode='html', reply_markup=kb)
         elif media_type == "video":
@@ -1233,52 +1236,63 @@ async def deleted_business_messages(event: types.BusinessMessagesDeleted, bot: B
     recipient_id = await ConnectionsDB.get_user_id(event.business_connection_id)
     if not recipient_id:
         return
+
+    async def process_single_deleted_message(msg_id):
+        try:
+            user_msg = await MessageStore.get(user_id=user_id, message_id=msg_id)
+            if not user_msg:
+                for _ in range(10):
+                    await asyncio.sleep(0.1)
+                    user_msg = await MessageStore.get(user_id=user_id, message_id=msg_id)
+                    if user_msg:
+                        break
+            if user_msg:
+                message_timestamp = datetime.fromisoformat(user_msg.timestamp).astimezone(timezone_local)
+                timestamp_formatted = message_timestamp.strftime('%d/%m/%y %H:%M')
+                if IS_BOOTING:
+                    MISSED_UPDATES_BUFFER.append({
+                        "type": "delete",
+                        "recipient_id": recipient_id,
+                        "user_fullname": user_fullname,
+                        "user_id": user_id,
+                        "username": username,
+                        "timestamp": timestamp_formatted,
+                        "media_type": user_msg.media_type,
+                        "file_id": user_msg.file_id,
+                        "old_text": user_msg.message_text
+                    })
+                else:
+                    try:
+                        await send_msg(
+                            message_old=user_msg.message_text,
+                            message_new=None,
+                            user_fullname=user_fullname,
+                            user_id=user_id,
+                            timestamp=timestamp_formatted,
+                            recipient_id=recipient_id,
+                            username=username,
+                            media_type=user_msg.media_type,
+                            file_id=user_msg.file_id,
+                            bot=bot
+                        )
+                    except Exception as send_err:
+                        logger.error(f"Failed to send deleted message {msg_id}: {send_err}")
+
+                    if user_msg.file_id:
+                        downloads_dir = os.path.join(BASE_DIR, "downloads")
+                        files = glob.glob(os.path.join(downloads_dir, f"{user_msg.file_id}.*"))
+                        for f in files:
+                            try:
+                                os.remove(f)
+                                logger.info(f"Deleted local file after deletion: {f}")
+                            except Exception as e:
+                                logger.warning(f"Failed to delete local file {f}: {e}")
+                await MessageStore.delete(user_id=user_id, message_id=msg_id)
+        except Exception as internal_err:
+            logger.error(f"Error processing deleted message ID {msg_id}: {internal_err}")
+
     for msg_id in event.message_ids:
-        user_msg = await MessageStore.get(user_id=user_id, message_id=msg_id)
-        if not user_msg:
-            for _ in range(10):
-                await asyncio.sleep(0.1)
-                user_msg = await MessageStore.get(user_id=user_id, message_id=msg_id)
-                if user_msg:
-                    break
-        if user_msg:
-            message_timestamp = datetime.fromisoformat(user_msg.timestamp).astimezone(timezone_local)
-            timestamp_formatted = message_timestamp.strftime('%d/%m/%y %H:%M')
-            if IS_BOOTING:
-                MISSED_UPDATES_BUFFER.append({
-                    "type": "delete",
-                    "recipient_id": recipient_id,
-                    "user_fullname": user_fullname,
-                    "user_id": user_id,
-                    "username": username,
-                    "timestamp": timestamp_formatted,
-                    "media_type": user_msg.media_type,
-                    "file_id": user_msg.file_id,
-                    "old_text": user_msg.message_text
-                })
-            else:
-                await send_msg(
-                    message_old=user_msg.message_text,
-                    message_new=None,
-                    user_fullname=user_fullname,
-                    user_id=user_id,
-                    timestamp=timestamp_formatted,
-                    recipient_id=recipient_id,
-                    username=username,
-                    media_type=user_msg.media_type,
-                    file_id=user_msg.file_id,
-                    bot=bot
-                )
-                if user_msg.file_id:
-                    downloads_dir = os.path.join(BASE_DIR, "downloads")
-                    files = glob.glob(os.path.join(downloads_dir, f"{user_msg.file_id}.*"))
-                    for f in files:
-                        try:
-                            os.remove(f)
-                            logger.info(f"Deleted local file after deletion: {f}")
-                        except Exception as e:
-                            logger.warning(f"Failed to delete local file {f}: {e}")
-            await MessageStore.delete(user_id=user_id, message_id=msg_id)
+        asyncio.create_task(process_single_deleted_message(msg_id))
 
 
 async def download_media(bot: Bot, file_id: str) -> Union[str, None]:
@@ -1540,7 +1554,9 @@ async def main() -> None:
             raise RuntimeError("psycopg2 is not installed but DATABASE_URL is set.")
         db_pool = ThreadedConnectionPool(1, 20, dsn=DATABASE_URL)
 
-    bot = Bot(token=TOKEN)
+    # Задаем увеличенный таймаут для aiohttp сессии бота
+    session = AiohttpSession(timeout=ClientTimeout(total=120))
+    bot = Bot(token=TOKEN, session=session)
     dp = Dispatcher()
     
     @dp.message(lambda msg: msg.text and msg.text.lower() in ["/ping", "!пинг", "пинг"])
@@ -1604,13 +1620,13 @@ async def main() -> None:
     
     await bot.delete_webhook(drop_pending_updates=False)
     
+    # Запускаем полинг с handle_as_tasks=True для полной асинхронности апдейтов
     await dp.start_polling(
         bot, 
         allowed_updates=["message", "business_message", "edited_business_message", "deleted_business_messages"], 
-        handle_as_tasks=False
+        handle_as_tasks=True
     )
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-
