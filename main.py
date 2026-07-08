@@ -1620,6 +1620,16 @@ async def main() -> None:
     
     await bot.delete_webhook(drop_pending_updates=False)
     
+       # === ИСПРАВЛЕННЫЙ БЛОК ДЛЯ САМОГО КОНЦА ФАЙЛА ===
+    
+    dp.update.outer_middleware(raw_update_middleware)
+    dp.include_router(router)
+    
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+    
+    await bot.delete_webhook(drop_pending_updates=False)
+    
     # Запускаем полинг с handle_as_tasks=True для полной асинхронности апдейтов
     await dp.start_polling(
         bot, 
@@ -1629,4 +1639,15 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Перед запуском подменяем таймаут сессии на обычное число, чтобы aiogram не ругался
+    from aiogram.client.session.aiohttp import AiohttpSession
+    
+    async def _fixed_main():
+        global bot
+        # Пересоздаем сессию с таймаутом в виде обычного числа (120 секунд)
+        session = AiohttpSession(timeout=120)
+        bot = Bot(token=TOKEN, session=session)
+        await main()
+
+    asyncio.run(_fixed_main())
+
