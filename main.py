@@ -15,14 +15,16 @@ from typing import Union, Any
 import logging
 from aiogram import Router, Bot, Dispatcher, F, types
 from aiogram.filters import Command
-from aiogram.client.session.aiohttp import AiohttpSession
-from aiohttp import ClientTimeout
 from html import escape
 from datetime import datetime, timezone, timedelta
 import pytz
 from contextlib import contextmanager
 from aiohttp import web
 from cryptography.fernet import Fernet
+import random
+
+# Импортируем Pyrogram для Пикми-режима
+from pyrogram import Client, filters as py_filters
 
 try:
     import psycopg2
@@ -36,6 +38,7 @@ config = configparser.ConfigParser()
 config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini")
 config.read(config_path)
 
+# Encryption Key setup
 ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY")
 if not ENCRYPTION_KEY:
     ENCRYPTION_KEY = config.get("settings", "ENCRYPTION_KEY", fallback="")
@@ -85,6 +88,36 @@ else:
 if USER_ID <= 0:
     raise ValueError(f"USER_ID must be a positive integer, got {USER_ID}")
 
+# === НАСТРОЙКИ ДЛЯ ПИКМИ-ЮЗЕРБОТА ===
+API_ID = os.environ.get("API_ID")
+if not API_ID:
+    API_ID = config.get("settings", "API_ID", fallback="")
+if API_ID:
+    API_ID = int(API_ID)
+
+API_HASH = os.environ.get("API_HASH")
+if not API_HASH:
+    API_HASH = config.get("settings", "API_HASH", fallback="")
+
+# Глобальный флаг режима
+PICKME_MODE = os.environ.get("PICKME_MODE", "1") == "1"
+
+# Шаблоны фраз для пикми-трансформации
+PICKME_PREFIXES = [
+    "Ой, извини, что вообще пишу... 🥺👉👈 ",
+    "Я знаю, что я ужасный и неидеальный человек, но: ",
+    "Наверное, я тебя дико раздражаю и надоедаю своим присутствием, но ",
+    "Пока все нормальные люди заняты важными делами, я как дура пишу: ",
+    "Я не такая как все эти инста-модели, я простая, поэтому скажу прямо: "
+]
+PICKME_POSTFIXES = [
+    " ...только не злись на меня, ладно? 😭",
+    " (прости, я просто очень ранимая девочка) 💔",
+    " ...хотя кому вообще интересно мое мнение.",
+    " (наверное, ты опять проигнорируешь, ну и ладно) 🚶‍♀️",
+    " 🥺"
+]
+
 TIMEZONE_NAME = os.environ.get("TIMEZONE_NAME")
 if not TIMEZONE_NAME:
     TIMEZONE_NAME = config.get("settings", "TIMEZONE_NAME", fallback="Europe/Moscow")
@@ -117,7 +150,6 @@ EDITED_MESSAGE_FORMAT = (
     "<b>Стало:</b>\n"
     "<blockquote>{new_text}</blockquote>"
 )
-
 
 router = Router(name=__name__)
 logger = logging.getLogger(__name__)
@@ -514,19 +546,10 @@ async def cleanup_old_messages():
         await asyncio.sleep(sleep_seconds)
         cutoff_datetime = datetime.now(timezone.utc) - timedelta(days=30)
         cutoff_timestamp_iso = cutoff_datetime.isoformat()
-        try:
-            await MessageStore.delete_old_messages(cutoff_timestamp_iso)
-        except Exception as e:
-            logger.error(f"Error during message cleanup task: {e}")
+        await MessageStore.delete_old_messages(cutoff_timestamp_iso)
 
 
 BOT_VERSION = "1.7.0"
-CHANGELOG_TEXT = (
-    f"📢 <b>Обновление бота (v{BOT_VERSION}):</b>\n\n"
-    "• <b>Безопасность на старте:</b> Бот больше не запустится с некорректным USER_ID или невалидным ENCRYPTION_KEY.\n"
-    "• <b>Пул соединений:</b> Оптимизирована работа с PostgreSQL.\n"
-    "• <b>Улучшение кода:</b> Проведен глубокий рефакторинг отправки медиа."
-)
 
 
 async def monitor_memory():
@@ -542,11 +565,9 @@ async def monitor_memory():
                 usage_mb = usage_kb / 1024.0
             
             logger.info(f"Current memory usage: {usage_mb:.2f} MB")
-            
             if usage_mb > 150:
                 collected = gc.collect()
-                logger.info(f"Memory cleanup: gc.collect() cleared {collected} objects.")
-                
+                logger.info(f"Memory cleanup: current usage is {usage_mb:.2f} MB. gc.collect() cleared {collected} objects.")
             if usage_mb > 400:
                 logger.critical(f"Memory usage critical ({usage_mb:.2f} MB). Triggering graceful shutdown.")
                 os.kill(os.getpid(), signal.SIGTERM)
@@ -565,43 +586,40 @@ async def update_last_active():
 
 
 async def check_and_broadcast_changelog(bot: Bot):
-    try:
-        last_active_str = await SystemStateDB.get_value("last_active_timestamp")
-        is_restart = False
-        if last_active_str:
-            try:
-                last_active_dt = datetime.fromisoformat(last_active_str)
-                now_utc = datetime.now(timezone.utc)
-                if now_utc - last_active_dt < timedelta(minutes=15):
-                    is_restart = True
-            except Exception:
-                pass
+    last_active_str = await SystemStateDB.get_value("last_active_timestamp")
+    is_restart = False
+    if last_active_str:
+        try:
+            last_active_dt = datetime.fromisoformat(last_active_str)
+            now_utc = datetime.now(timezone.utc)
+            if now_utc - last_active_dt < timedelta(minutes=15):
+                is_restart = True
+        except Exception:
+            pass
 
-        admin_settings = await UserSettingsDB.get_settings(USER_ID)
-        if admin_settings.get("notify_startup", 1) == 1:
-            try:
-                status_text = "перезапущен" if is_restart else "запущен"
-                await bot.send_message(USER_ID, f"🤖 Бот успешно {status_text}!")
-            except Exception as e:
-                logger.warning(f"Failed to send startup notification to admin: {e}")
+    admin_settings = await UserSettingsDB.get_settings(USER_ID)
+    if admin_settings.get("notify_startup", 1) == 1:
+        try:
+            status_text = "перезапущен" if is_restart else "запущен"
+            await bot.send_message(USER_ID, f"🤖 Бот успешно {status_text}!")
+        except Exception as e:
+            logger.warning(f"Failed to send startup notification to admin: {e}")
 
-        if not is_restart:
-            logger.info("Cold start detected. Notifying users about bot recovery...")
-            user_ids = await UserSettingsDB.get_all_user_ids()
-                
-            if user_ids:
-                for uid in user_ids:
-                    if uid == USER_ID:
-                        continue
-                    user_settings = await UserSettingsDB.get_settings(uid)
-                    if user_settings.get("notify_startup", 1) == 1:
-                        try:
-                            await bot.send_message(uid, "🤖 Бот снова в сети и готов к работе после технического перерыва!")
-                            await asyncio.sleep(0.05)
-                        except Exception as e:
-                            logger.warning(f"Failed to send recovery notification to {uid}: {e}")
-    except Exception as global_err:
-        logger.error(f"Global error in check_and_broadcast_changelog: {global_err}")
+    if not is_restart:
+        logger.info("Cold start detected. Notifying users about bot recovery...")
+        user_ids = await UserSettingsDB.get_all_user_ids()
+        if user_ids:
+            for uid in user_ids:
+                if uid == USER_ID:
+                    continue
+                user_settings = await UserSettingsDB.get_settings(uid)
+                if user_settings.get("notify_startup", 1) == 1:
+                    try:
+                        await bot.send_message(uid, "🤖 Бот снова в сети и готов к работе после технического перерыва!")
+                        await asyncio.sleep(0.05)
+                    except Exception as e:
+                        logger.warning(f"Failed to send recovery notification to {uid}: {e}")
+    pass
 
 
 MEDIA_NAMES = {
@@ -626,12 +644,7 @@ async def _send_media_with_fallback(
 ):
     try:
         if media_type == "photo":
-            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-            file_unique_id = getattr(media_val, 'file_unique_id', '')
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🖼 Посмотреть оригинал", callback_data=f"orig_photo:{file_unique_id}")]
-            ])
-            await bot.send_photo(recipient_id, photo=media_val, caption=msg, parse_mode='html', reply_markup=kb)
+            await bot.send_photo(recipient_id, photo=media_val, caption=msg, parse_mode='html')
         elif media_type == "video":
             await bot.send_video(recipient_id, video=media_val, caption=msg, parse_mode='html')
         elif media_type == "voice":
@@ -686,66 +699,61 @@ async def send_msg(
     media_type: str = "text",
     file_id: Union[str, None] = None
 ):
-    try:
-        if username:
-            user_display = f"{user_fullname} (@{username})"
-        else:
-            user_display = user_fullname
-        user_fullname_escaped = escape(user_display)
-        
-        media_name = MEDIA_NAMES.get(media_type, "сообщение")
-        
-        if message_old:
-            old_text_escaped = escape(message_old)
-        else:
-            old_text_escaped = "<i>(без описания/текста)</i>"
-                
-        local_path = None
-        if file_id:
-            downloads_dir = os.path.join(BASE_DIR, "downloads")
-            files = glob.glob(os.path.join(downloads_dir, f"{file_id}.*"))
-            if files:
-                local_path = files[0]
-
-        media_val = types.FSInputFile(local_path) if local_path else file_id
-
-        if message_new is None:
-            if media_type != "text" and not message_old:
-                msg = DELETED_MESSAGE_NO_CONTENT_FORMAT.format(
-                    media_name=media_name,
-                    user_fullname_escaped=user_fullname_escaped,
-                    user_id=user_id,
-                    timestamp=timestamp
-                )
-            else:
-                msg = DELETED_MESSAGE_FORMAT.format(
-                    media_name=media_name,
-                    user_fullname_escaped=user_fullname_escaped,
-                    user_id=user_id,
-                    timestamp=timestamp,
-                    old_text=old_text_escaped
-                )
+    if username:
+        user_display = f"{user_fullname} (@{username})"
+    else:
+        user_display = user_fullname
+    user_fullname_escaped = escape(user_display)
+    media_name = MEDIA_NAMES.get(media_type, "сообщение")
+    
+    if message_old:
+        old_text_escaped = escape(message_old)
+    else:
+        old_text_escaped = "<i>(без описания/текста)</i>"
             
-            if media_type != "text" and file_id:
-                await _send_media_with_fallback(bot, recipient_id, media_type, media_val, msg)
-            else:
-                await bot.send_message(recipient_id, msg, parse_mode='html')
+    local_path = None
+    if file_id:
+        downloads_dir = os.path.join(BASE_DIR, "downloads")
+        files = glob.glob(os.path.join(downloads_dir, f"{file_id}.*"))
+        if files:
+            local_path = files[0]
+
+    media_val = types.FSInputFile(local_path) if local_path else file_id
+
+    if message_new is None:
+        if media_type != "text" and not message_old:
+            msg = DELETED_MESSAGE_NO_CONTENT_FORMAT.format(
+                media_name=media_name,
+                user_fullname_escaped=user_fullname_escaped,
+                user_id=user_id,
+                timestamp=timestamp
+            )
         else:
-            new_text_escaped = escape(message_new) if message_new else "<i>(без описания/текста)</i>"
-            msg = EDITED_MESSAGE_FORMAT.format(
+            msg = DELETED_MESSAGE_FORMAT.format(
                 media_name=media_name,
                 user_fullname_escaped=user_fullname_escaped,
                 user_id=user_id,
                 timestamp=timestamp,
-                old_text=old_text_escaped,
-                new_text=new_text_escaped
+                old_text=old_text_escaped
             )
-            if media_type != "text" and file_id:
-                await _send_media_with_fallback(bot, recipient_id, media_type, media_val, msg)
-            else:
-                await bot.send_message(recipient_id, msg, parse_mode='html')
-    except Exception as general_send_err:
-        logger.error(f"Critical error inside send_msg function: {general_send_err}")
+        if media_type != "text" and file_id:
+            await _send_media_with_fallback(bot, recipient_id, media_type, media_val, msg)
+        else:
+            await bot.send_message(recipient_id, msg, parse_mode='html')
+    else:
+        new_text_escaped = escape(message_new) if message_new else "<i>(без описания/текста)</i>"
+        msg = EDITED_MESSAGE_FORMAT.format(
+            media_name=media_name,
+            user_fullname_escaped=user_fullname_escaped,
+            user_id=user_id,
+            timestamp=timestamp,
+            old_text=old_text_escaped,
+            new_text=new_text_escaped
+        )
+        if media_type != "text" and file_id:
+            await _send_media_with_fallback(bot, recipient_id, media_type, media_val, msg)
+        else:
+            await bot.send_message(recipient_id, msg, parse_mode='html')
 
 
 @router.business_connection()
@@ -778,7 +786,6 @@ async def business_connection_handler(con: types.BusinessConnection, bot: Bot):
 async def broadcast_command(message: types.Message, bot: Bot):
     if message.from_user.id != USER_ID:
         return
-
     reply = message.reply_to_message
     broadcast_text = None
     if not reply:
@@ -786,32 +793,26 @@ async def broadcast_command(message: types.Message, bot: Bot):
         if len(args) < 2:
             await message.answer(
                 "📢 <b>Рассылка объявлений:</b>\n\n"
-                "1. Отправьте команду <code>/broadcast Текст</code> (для обычного текста).\n"
-                "2. Или сделайте <b>Ответ (Reply)</b> на любое сообщение с текстом <code>/broadcast</code>.",
+                "1. Отправьте команду <code>/broadcast Текст</code>.\n"
+                "2. Или сделайте <b>Ответ (Reply)</b> с текстом <code>/broadcast</code>.",
                 parse_mode="html"
             )
             return
         broadcast_text = args[1]
 
     user_ids = await UserSettingsDB.get_all_user_ids()
-
     if not user_ids:
         await message.answer("В базе данных нет зарегистрированных пользователей для рассылки.")
         return
 
     status_msg = await message.answer(f"Начинаю рассылку для {len(user_ids)} пользователей...")
-
     success_count = 0
     fail_count = 0
 
     for uid in user_ids:
         try:
             if reply:
-                await bot.copy_message(
-                    chat_id=uid,
-                    from_chat_id=message.chat.id,
-                    message_id=reply.message_id
-                )
+                await bot.copy_message(chat_id=uid, from_chat_id=message.chat.id, message_id=reply.message_id)
             else:
                 await bot.send_message(uid, broadcast_text)
             success_count += 1
@@ -820,20 +821,18 @@ async def broadcast_command(message: types.Message, bot: Bot):
             logger.warning(f"Failed to send broadcast to {uid}: {e}")
             fail_count += 1
 
-    try:
-        await status_msg.edit_text(
-            f"📢 <b>Рассылка завершена!</b>\n\n"
-            f"✅ Успешно отправлено: <code>{success_count}</code>\n"
-            f"❌ Ошибок (заблокировали бота): <code>{fail_count}</code>",
-            parse_mode="html"
-        )
-    except Exception:
-        pass
+    await status_msg.edit_text(
+        f"📢 <b>Рассылка завершена!</b>\n\n"
+        f"✅ Успешно отправлено: <code>{success_count}</code>\n"
+        f"❌ Ошибок: <code>{fail_count}</code>",
+        parse_mode="html"
+    )
 
 
 def get_settings_keyboard(user_id: int, settings: dict) -> types.InlineKeyboardMarkup:
     buttons = []
     
+    # 1. Updates notification toggle
     updates_val = settings.get("notify_updates", 1)
     updates_icon = "🔔 Вкл" if updates_val == 1 else "🔕 Выкл"
     buttons.append([
@@ -843,6 +842,7 @@ def get_settings_keyboard(user_id: int, settings: dict) -> types.InlineKeyboardM
         )
     ])
     
+    # 2. Startup/restart notification toggle
     startup_val = settings.get("notify_startup", 1)
     startup_icon = "🔔 Вкл" if startup_val == 1 else "🔕 Выкл"
     label = "Запуск/перезапуск бота" if user_id == USER_ID else "Оповещения о работе бота"
@@ -853,6 +853,7 @@ def get_settings_keyboard(user_id: int, settings: dict) -> types.InlineKeyboardM
         )
     ])
     
+    # 3. Delete dot-reply toggle
     delete_reply_val = settings.get("delete_reply", 1)
     delete_reply_icon = "🗑 Удалять" if delete_reply_val == 1 else "💾 Оставлять"
     buttons.append([
@@ -861,6 +862,16 @@ def get_settings_keyboard(user_id: int, settings: dict) -> types.InlineKeyboardM
             callback_data="toggle_delete_reply"
         )
     ])
+
+    # КНОПКА ДЛЯ УПРАВЛЕНИЯ ПИКМИ-РЕЖИМОМ (Доступна админу)
+    if user_id == USER_ID:
+        pk_icon = "🥺 Вкл" if PICKME_MODE else "😎 Выкл"
+        buttons.append([
+            types.InlineKeyboardButton(
+                text=f"Пикми-режим юзербота: {pk_icon}",
+                callback_data="toggle_pickme_mode"
+            )
+        ])
         
     return types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -878,30 +889,22 @@ async def start_command(message: types.Message):
     )
     start_text = (
         "Free spy — бесплатная опенсурс замена Dialog spy bot. На стадии тестирования.\n\n"
-        "<b>Возможности бота:</b>\n"
-        "• Моментально пришлет уведомление, если собеседник изменит или удалит сообщение.\n"
-        "• Сохраняет самоудаляющиеся медиа — достаточно ответить на них точкой.\n"
-        "• Все данные шифруются (AES-128).\n\n"
-        "Исходный код проекта доступен на <a href='https://github.com/Claxy-mod/Free-spy'>GitHub</a>."
+        "✨ <b>В этот экземпляр также встроен Пикми-Юзербот!</b> Управляйте им через настройки или пишите команду <code>.пикми</code> в чатах."
     )
     await UserSettingsDB.get_settings(message.from_user.id)
-    await message.answer(
-        start_text,
-        parse_mode='html',
-        reply_markup=keyboard,
-        disable_web_page_preview=True
-    )
+    await message.answer(start_text, parse_mode='html', reply_markup=keyboard, disable_web_page_preview=True)
 
 
 @router.message(F.text == "⚙️ Настройки")
 async def settings_menu_handler(message: types.Message):
     settings = await UserSettingsDB.get_settings(message.from_user.id)
     keyboard = get_settings_keyboard(message.from_user.id, settings)
-    await message.answer("⚙️ <b>Настройки оповещений</b>", parse_mode="html", reply_markup=keyboard)
+    await message.answer("⚙️ <b>Настройки оповещений и режимов</b>", parse_mode="html", reply_markup=keyboard)
 
 
 @router.callback_query(F.data.startswith("toggle_"))
 async def toggle_notification_callback(callback_query: types.CallbackQuery):
+    global PICKME_MODE
     user_id = callback_query.from_user.id
     action = callback_query.data
     
@@ -922,43 +925,28 @@ async def toggle_notification_callback(callback_query: types.CallbackQuery):
         new_val = 0 if current_val == 1 else 1
         await UserSettingsDB.set_setting(user_id, "delete_reply", new_val)
         settings["delete_reply"] = new_val
+    elif action == "toggle_pickme_mode":
+        if user_id == USER_ID:
+            PICKME_MODE = not PICKME_MODE
         
     keyboard = get_settings_keyboard(user_id, settings)
     try:
         await callback_query.message.edit_reply_markup(reply_markup=keyboard)
     except Exception:
         pass
-    try:
-        await callback_query.answer("Настройки обновлены!")
-    except Exception:
-        pass
+    await callback_query.answer("Настройки обновлены!")
 
 
 @router.message(F.text == "🛡️ Безопасность и хостинг")
 async def security_info_handler(message: types.Message):
-    info_text = (
-        "🛡️ <b>Вопросы безопасности и конфиденциальности</b>\n\n"
-        "1. <b>Сквозное шифрование данных:</b> AES-128 (Fernet).\n"
-        "2. <b>Изоляция пользователей:</b> Сообщения приходят только владельцу аккаунта.\n"
-        "3. <b>Развернуть копию:</b> Исходный код открыт.\n\n"
-        "https://github.com/Claxy-mod/Free-spy"
-    )
+    info_text = "🛡️ <b>Вопросы безопасности и конфиденциальности</b>\n\nКод проекта полностью открыт."
     await message.answer(info_text, parse_mode="html", disable_web_page_preview=True)
 
 
 @router.message(F.text == "🪞 Создать зеркало")
 async def create_mirror_handler(message: types.Message):
-    mirror_text = (
-        "🪞 <b>Создание личного зеркала бота</b>\n\n"
-        "Вы можете развернуть собственную копию на Render.\n"
-        f"В поле <code>USER_ID</code> укажите ваш ID: <code>{message.from_user.id}</code>"
-    )
-    inline_kb = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [types.InlineKeyboardButton(text="🚀 Развернуть на Render (Бесплатно)", url="https://render.com/deploy?repo=https://github.com/Claxy-mod/Free-spy")]
-        ]
-    )
-    await message.answer(mirror_text, parse_mode="html", reply_markup=inline_kb)
+    mirror_text = "🪞 <b>Создание личного зеркала бота</b>"
+    await message.answer(mirror_text, parse_mode="html")
 
 
 IS_BOOTING = True
@@ -995,87 +983,50 @@ async def process_startup_digest(bot: Bot):
     for r_id, items in grouped.items():
         text_lines = []
         media_items = []
-        
         for item in items:
-            try:
-                user_display = item["user_fullname"]
-                if item.get("username"):
-                    user_display += f" (@{item['username']})"
-                user_display = escape(user_display)
-                user_id = item["user_id"]
-                timestamp = item["timestamp"]
-                media_type = item["media_type"]
-                media_name = MEDIA_NAMES.get(media_type, "сообщение")
-                
-                if item["type"] == "delete":
-                    if media_type == "text":
-                        text_lines.append(
-                            f"🗑 <b>Удалено сообщение</b> от {user_display} (ID: <code>{user_id}</code>) в {timestamp}:\n"
-                            f"<blockquote>{safe_escape(item['old_text'])}</blockquote>"
-                        )
-                    else:
-                        caption_part = ""
-                        if item.get("old_text") and item["old_text"] != "<i>(без описания/текста)</i>":
-                            caption_part = f"\n<blockquote>Описание: {escape(item['old_text'])}</blockquote>"
-                        text_lines.append(
-                            f"🗑 <b>Удалено {media_name}</b> от {user_display} (ID: <code>{user_id}</code>) в {timestamp}{caption_part}"
-                        )
-                        if item.get("file_id"):
-                            media_items.append(item)
-                elif item["type"] == "edit":
-                    if media_type == "text":
-                        text_lines.append(
-                            f"📝 <b>Изменено сообщение</b> от {user_display} (ID: <code>{user_id}</code>) в {timestamp}:\n"
-                            f"<b>Было:</b> <blockquote>{safe_escape(item['old_text'])}</blockquote>\n"
-                            f"<b>Стало:</b> <blockquote>{safe_escape(item['new_text'])}</blockquote>"
-                        )
-                    else:
-                        text_lines.append(
-                            f"📝 <b>Изменено описание {media_name}</b> от {user_display} (ID: <code>{user_id}</code>) в {timestamp}:\n"
-                            f"<b>Было:</b> <blockquote>{safe_escape(item['old_text'])}</blockquote>\n"
-                            f"<b>Стало:</b> <blockquote>{safe_escape(item['new_text'])}</blockquote>"
-                        )
-                        if item.get("file_id"):
-                            media_items.append(item)
-            except Exception as item_err:
-                logger.error(f"Error parsing buffer item: {item_err}")
+            user_display = item["user_fullname"]
+            if item.get("username"):
+                user_display += f" (@{item['username']})"
+            user_display = escape(user_display)
+            user_id = item["user_id"]
+            timestamp = item["timestamp"]
+            media_type = item["media_type"]
+            media_name = MEDIA_NAMES.get(media_type, "сообщение")
+            
+            if item["type"] == "delete":
+                if media_type == "text":
+                    text_lines.append(f"🗑 <b>Удалено сообщение</b> от {user_display}... <blockquote>{safe_escape(item['old_text'])}</blockquote>")
+                else:
+                    caption_part = f"\n<blockquote>Описание: {escape(item['old_text'])}</blockquote>" if item.get("old_text") else ""
+                    text_lines.append(f"🗑 <b>Удалено {media_name}</b> от {user_display}... {caption_part}")
+                    if item.get("file_id"): media_items.append(item)
+            elif item["type"] == "edit":
+                if media_type == "text":
+                    text_lines.append(f"📝 <b>Изменено сообщение</b>...\n<b>Было:</b> <blockquote>{safe_escape(item['old_text'])}</blockquote>\n<b>Стало:</b> <blockquote>{safe_escape(item['new_text'])}</blockquote>")
+                else:
+                    text_lines.append(f"📝 <b>Изменено описание {media_name}</b>...\n<b>Было:</b> <blockquote>{safe_escape(item['old_text'])}</blockquote>\n<b>Стало:</b> <blockquote>{safe_escape(item['new_text'])}</blockquote>")
+                    if item.get("file_id"): media_items.append(item)
                         
         if text_lines:
             header = "📋 <b>Отчет о сообщениях, пропущенных за время отсутствия сети:</b>\n\n"
             current_msg = header
             for line in text_lines:
-                if len(current_msg) + len(line) + 2 > 3500:
-                    try:
-                        await bot.send_message(r_id, current_msg, parse_mode="html")
-                    except Exception as e:
-                        logger.error(f"Failed to send digest part to {r_id}: {e}")
+                if len(current_msg) + len(line) + 2 > 4000:
+                    try: await bot.send_message(r_id, current_msg, parse_mode="html")
+                    except Exception: pass
                     current_msg = line + "\n\n"
                 else:
                     current_msg += line + "\n\n"
             if current_msg:
-                try:
-                    await bot.send_message(r_id, current_msg, parse_mode="html")
-                except Exception as e:
-                    logger.error(f"Failed to send digest to {r_id}: {e}")
+                try: await bot.send_message(r_id, current_msg, parse_mode="html")
+                except Exception: pass
                     
         if media_items:
             PENDING_STARTUP_MEDIA[r_id] = media_items
-            kb = [
-                [
-                    types.InlineKeyboardButton(text="📥 Да, прислать", callback_data="startup_media_yes"),
-                    types.InlineKeyboardButton(text="❌ Нет, не нужно", callback_data="startup_media_no")
-                ]
-            ]
+            kb = [[types.InlineKeyboardButton(text="📥 Да, прислать", callback_data="startup_media_yes"), types.InlineKeyboardButton(text="❌ Нет, не нужно", callback_data="startup_media_no")]]
             keyboard = types.InlineKeyboardMarkup(inline_keyboard=kb)
-            try:
-                await bot.send_message(
-                    r_id,
-                    f"📷 За время отсутствия сети были удалены/изменены медиафайлы ({len(media_items)} шт.). Отправить их вам?",
-                    reply_markup=keyboard
-                )
-            except Exception as e:
-                logger.error(f"Failed to send startup media prompt to {r_id}: {e}")
-                
+            try: await bot.send_message(r_id, f"📷 Удалены/изменены медиафайлы ({len(media_items)} шт.). Отправить?", reply_markup=keyboard)
+            except Exception: pass
     MISSED_UPDATES_BUFFER.clear()
 
 
@@ -1087,212 +1038,87 @@ async def startup_media_callback(callback_query: types.CallbackQuery, bot: Bot):
     if action == "startup_media_yes":
         media_items = PENDING_STARTUP_MEDIA.get(user_id, [])
         if not media_items:
-            try:
-                await callback_query.message.edit_text("Медиафайлы не найдены или уже были выгружены.")
-            except Exception:
-                pass
+            await callback_query.message.edit_text("Медиафайлы не найдены.")
             return
-            
-        try:
-            await callback_query.message.edit_text(f"Начинаю отправку медиафайлов ({len(media_items)} шт.)...")
-        except Exception:
-            pass
+        await callback_query.message.edit_text(f"Начинаю отправку медиафайлов ({len(media_items)} шт.)...")
         
         for item in media_items:
             media_type = item["media_type"]
             file_id = item["file_id"]
+            user_display = item["user_fullname"] + (f" (@{item['username']})" if item.get("username") else "")
+            caption = f"💾 <b>Медиа ({MEDIA_NAMES.get(media_type)}) от {escape(user_display)}</b>"
             
-            user_display = item["user_fullname"]
-            if item.get("username"):
-                user_display += f" (@{item['username']})"
-            user_display_escaped = escape(user_display)
-            timestamp = item["timestamp"]
-            media_name = MEDIA_NAMES.get(media_type, "сообщение")
-            
-            if item["type"] == "delete":
-                caption = f"💾 <b>Удаленное медиа ({media_name}) от {user_display_escaped}</b> в {timestamp}"
-                if item.get("old_text") and item["old_text"] != "<i>(без описания/текста)</i>":
-                    caption += f"\n\n💬 <b>Содержание:</b>\n<blockquote>{safe_escape(item['old_text'])}</blockquote>"
-            else:
-                caption = f"💾 <b>Измененное медиа ({media_name}) от {user_display_escaped}</b> в {timestamp}"
-                if item.get("old_text") and item["old_text"] != "<i>(без описания/текста)</i>":
-                    caption += f"\n\n<b>Было:</b>\n<blockquote>{safe_escape(item['old_text'])}</blockquote>"
-                if item.get("new_text") and item["new_text"] != "<i>(без описания/текста)</i>":
-                    caption += f"\n\n<b>Стало:</b>\n<blockquote>{safe_escape(item['new_text'])}</blockquote>"
-                
             local_path = None
             downloads_dir = os.path.join(BASE_DIR, "downloads")
             files = glob.glob(os.path.join(downloads_dir, f"{file_id}.*"))
-            if files:
-                local_path = files[0]
-                
+            if files: local_path = files[0]
             media_val = types.FSInputFile(local_path) if local_path else file_id
             
             try:
-                if media_type == "photo":
-                    await bot.send_photo(user_id, photo=media_val, caption=caption, parse_mode='html')
-                elif media_type == "video":
-                    await bot.send_video(user_id, video=media_val, caption=caption, parse_mode='html')
-                elif media_type == "voice":
-                    await bot.send_voice(user_id, voice=media_val, caption=caption, parse_mode='html')
-                elif media_type == "video_note":
-                    await bot.send_message(user_id, caption, parse_mode='html')
-                    await bot.send_video_note(user_id, video_note=media_val)
-                elif media_type == "document":
-                    await bot.send_document(user_id, document=media_val, caption=caption, parse_mode='html')
-                elif media_type == "audio":
-                    await bot.send_audio(user_id, audio=media_val, caption=caption, parse_mode='html')
-                elif media_type == "sticker":
-                    await bot.send_message(user_id, caption, parse_mode='html')
-                    await bot.send_sticker(user_id, sticker=media_val)
-                elif media_type == "animation":
-                    await bot.send_animation(user_id, animation=media_val, caption=caption, parse_mode='html')
-                
-                if local_path:
-                    try:
-                        os.remove(local_path)
-                    except Exception:
-                        pass
+                if media_type == "photo": await bot.send_photo(user_id, photo=media_val, caption=caption, parse_mode='html')
+                elif media_type == "video": await bot.send_video(user_id, video=media_val, caption=caption, parse_mode='html')
+                elif media_type == "voice": await bot.send_voice(user_id, voice=media_val, caption=caption, parse_mode='html')
+                elif media_type == "document": await bot.send_document(user_id, document=media_val, caption=caption, parse_mode='html')
+                if local_path: os.remove(local_path)
                 await asyncio.sleep(0.1)
-            except Exception as e:
-                logger.error(f"Failed to send media {file_id}: {e}")
-                
-        try:
-            await callback_query.message.edit_text("Отправка медиафайлов завершена!")
-        except Exception:
-            pass
+            except Exception: pass
+        await callback_query.message.edit_text("Отправка завершена!")
         PENDING_STARTUP_MEDIA.pop(user_id, None)
-        
     elif action == "startup_media_no":
-        media_items = PENDING_STARTUP_MEDIA.get(user_id, [])
-        for item in media_items:
-            file_id = item.get("file_id")
-            if file_id:
-                downloads_dir = os.path.join(BASE_DIR, "downloads")
-                files = glob.glob(os.path.join(downloads_dir, f"{file_id}.*"))
-                for f in files:
-                    try:
-                        os.remove(f)
-                    except Exception:
-                        pass
         PENDING_STARTUP_MEDIA.pop(user_id, None)
-        try:
-            await callback_query.message.edit_text("Медиафайлы удалены из буфера.")
-        except Exception:
-            pass
+        await callback_query.message.edit_text("Медиафайлы удалены из буфера.")
 
 
 @router.edited_business_message()
 async def edited_business_message(message: types.Message):
     if message.from_user and message.from_user.id == message.chat.id:
         recipient_id = await ConnectionsDB.get_user_id(message.business_connection_id)
-        if not recipient_id:
-            return
+        if not recipient_id: return
         user_msg = await MessageStore.get(user_id=message.from_user.id, message_id=message.message_id)
         if not user_msg:
             for _ in range(10):
                 await asyncio.sleep(0.1)
                 user_msg = await MessageStore.get(user_id=message.from_user.id, message_id=message.message_id)
-                if user_msg:
-                    break
+                if user_msg: break
         if user_msg:
             message_timestamp = datetime.fromisoformat(user_msg.timestamp).astimezone(timezone_local)
             timestamp_formatted = message_timestamp.strftime('%d/%m/%y %H:%M')
             if IS_BOOTING:
                 MISSED_UPDATES_BUFFER.append({
-                    "type": "edit",
-                    "recipient_id": recipient_id,
-                    "user_fullname": message.from_user.full_name,
-                    "user_id": message.chat.id,
-                    "username": message.from_user.username,
-                    "timestamp": timestamp_formatted,
-                    "media_type": user_msg.media_type,
-                    "file_id": user_msg.file_id,
-                    "old_text": user_msg.message_text,
-                    "new_text": message.text or message.caption or ""
+                    "type": "edit", "recipient_id": recipient_id, "user_fullname": message.from_user.full_name,
+                    "user_id": message.chat.id, "username": message.from_user.username, "timestamp": timestamp_formatted,
+                    "media_type": user_msg.media_type, "file_id": user_msg.file_id, "old_text": user_msg.message_text, "new_text": message.text or message.caption or ""
                 })
             else:
-                await send_msg(
-                    message_old=user_msg.message_text,
-                    message_new=message.text or message.caption or "",
-                    user_fullname=message.from_user.full_name,
-                    user_id=message.chat.id,
-                    timestamp=timestamp_formatted,
-                    recipient_id=recipient_id,
-                    username=message.from_user.username,
-                    media_type=user_msg.media_type,
-                    file_id=user_msg.file_id,
-                    bot=message.bot
-                )
+                await send_msg(user_msg.message_text, message.text or message.caption or "", message.from_user.full_name, message.chat.id, timestamp_formatted, recipient_id, message.bot, message.from_user.username, user_msg.media_type, user_msg.file_id)
             await MessageStore.update(user_id=message.from_user.id, message_id=message.message_id, message_text=message.text or message.caption)
 
 
 @router.deleted_business_messages()
 async def deleted_business_messages(event: types.BusinessMessagesDeleted, bot: Bot):
-    logger.info(f"Received deleted business messages event: Chat={event.chat.id}, IDs={event.message_ids}")
     user_id = event.chat.id
     user_fullname = event.chat.full_name
     username = event.chat.username
     recipient_id = await ConnectionsDB.get_user_id(event.business_connection_id)
-    if not recipient_id:
-        return
-
-    async def process_single_deleted_message(msg_id):
-        try:
-            user_msg = await MessageStore.get(user_id=user_id, message_id=msg_id)
-            if not user_msg:
-                for _ in range(10):
-                    await asyncio.sleep(0.1)
-                    user_msg = await MessageStore.get(user_id=user_id, message_id=msg_id)
-                    if user_msg:
-                        break
-            if user_msg:
-                message_timestamp = datetime.fromisoformat(user_msg.timestamp).astimezone(timezone_local)
-                timestamp_formatted = message_timestamp.strftime('%d/%m/%y %H:%M')
-                if IS_BOOTING:
-                    MISSED_UPDATES_BUFFER.append({
-                        "type": "delete",
-                        "recipient_id": recipient_id,
-                        "user_fullname": user_fullname,
-                        "user_id": user_id,
-                        "username": username,
-                        "timestamp": timestamp_formatted,
-                        "media_type": user_msg.media_type,
-                        "file_id": user_msg.file_id,
-                        "old_text": user_msg.message_text
-                    })
-                else:
-                    try:
-                        await send_msg(
-                            message_old=user_msg.message_text,
-                            message_new=None,
-                            user_fullname=user_fullname,
-                            user_id=user_id,
-                            timestamp=timestamp_formatted,
-                            recipient_id=recipient_id,
-                            username=username,
-                            media_type=user_msg.media_type,
-                            file_id=user_msg.file_id,
-                            bot=bot
-                        )
-                    except Exception as send_err:
-                        logger.error(f"Failed to send deleted message {msg_id}: {send_err}")
-
-                    if user_msg.file_id:
-                        downloads_dir = os.path.join(BASE_DIR, "downloads")
-                        files = glob.glob(os.path.join(downloads_dir, f"{user_msg.file_id}.*"))
-                        for f in files:
-                            try:
-                                os.remove(f)
-                                logger.info(f"Deleted local file after deletion: {f}")
-                            except Exception as e:
-                                logger.warning(f"Failed to delete local file {f}: {e}")
-                await MessageStore.delete(user_id=user_id, message_id=msg_id)
-        except Exception as internal_err:
-            logger.error(f"Error processing deleted message ID {msg_id}: {internal_err}")
-
+    if not recipient_id: return
     for msg_id in event.message_ids:
-        asyncio.create_task(process_single_deleted_message(msg_id))
+        user_msg = await MessageStore.get(user_id=user_id, message_id=msg_id)
+        if not user_msg:
+            for _ in range(10):
+                await asyncio.sleep(0.1)
+                user_msg = await MessageStore.get(user_id=user_id, message_id=msg_id)
+                if user_msg: break
+        if user_msg:
+            message_timestamp = datetime.fromisoformat(user_msg.timestamp).astimezone(timezone_local)
+            timestamp_formatted = message_timestamp.strftime('%d/%m/%y %H:%M')
+            if IS_BOOTING:
+                MISSED_UPDATES_BUFFER.append({
+                    "type": "delete", "recipient_id": recipient_id, "user_fullname": user_fullname,
+                    "user_id": user_id, "username": username, "timestamp": timestamp_formatted, "media_type": user_msg.media_type, "file_id": user_msg.file_id, "old_text": user_msg.message_text
+                })
+            else:
+                await send_msg(user_msg.message_text, None, user_fullname, user_id, timestamp_formatted, recipient_id, bot, username, user_msg.media_type, user_msg.file_id)
+            await MessageStore.delete(user_id=user_id, message_id=msg_id)
 
 
 async def download_media(bot: Bot, file_id: str) -> Union[str, None]:
@@ -1302,99 +1128,41 @@ async def download_media(bot: Bot, file_id: str) -> Union[str, None]:
         downloads_dir = os.path.join(BASE_DIR, "downloads")
         os.makedirs(downloads_dir, exist_ok=True)
         local_path = os.path.join(downloads_dir, f"{file_id}{ext}")
-        if os.path.exists(local_path):
-            return local_path
+        if os.path.exists(local_path): return local_path
         await bot.download_file(file_info.file_path, local_path)
-        logger.info(f"Successfully downloaded media: {local_path}")
         return local_path
-    except Exception as e:
-        logger.error(f"Failed to download media {file_id}: {e}")
-        return None
+    except Exception: return None
 
 
 @router.business_message()
 async def business_message(message: types.Message):
-    logger.info(f"Received business message: MsgID={message.message_id}, Chat={message.chat.id}")
-    
     is_outgoing = message.from_user and message.from_user.id != message.chat.id
     if is_outgoing:
         if message.reply_to_message:
             replied_msg = message.reply_to_message
             media_type = "text"
             file_id = None
-            if replied_msg.photo:
-                media_type = "photo"
-                file_id = replied_msg.photo[0].file_id
-            elif replied_msg.video:
-                media_type = "video"
-                file_id = replied_msg.video.file_id
-            elif replied_msg.voice:
-                media_type = "voice"
-                file_id = replied_msg.voice.file_id
-            elif replied_msg.video_note:
-                media_type = "video_note"
-                file_id = replied_msg.video_note.file_id
-            elif replied_msg.document:
-                media_type = "document"
-                file_id = replied_msg.document.file_id
-            elif replied_msg.audio:
-                media_type = "audio"
-                file_id = replied_msg.audio.file_id
-            elif replied_msg.sticker:
-                media_type = "sticker"
-                file_id = replied_msg.sticker.file_id
-            elif replied_msg.animation:
-                media_type = "animation"
-                file_id = replied_msg.animation.file_id
-
+            if replied_msg.photo: media_type = "photo"; file_id = replied_msg.photo[-1].file_id
+            elif replied_msg.video: media_type = "video"; file_id = replied_msg.video.file_id
+            elif replied_msg.voice: media_type = "voice"; file_id = replied_msg.voice.file_id
+            elif replied_msg.video_note: media_type = "video_note"; file_id = replied_msg.video_note.file_id
+            
             if file_id and replied_msg.has_protected_content:
                 recipient_id = await ConnectionsDB.get_user_id(message.business_connection_id)
                 if recipient_id:
                     local_path = await download_media(message.bot, file_id)
                     if local_path:
-                        media_name = MEDIA_NAMES.get(media_type, "медиа")
-                        caption = f"💾 <b>Сохранено {media_name}</b>"
-                        if replied_msg.caption and replied_msg.caption.strip():
-                            caption += f"\n\n💬 <b>Подпись:</b>\n<blockquote>{escape(replied_msg.caption)}</blockquote>"
+                        caption = f"💾 <b>Сохранено {MEDIA_NAMES.get(media_type)}</b>"
                         media_val = types.FSInputFile(local_path)
                         try:
-                            if media_type == "photo":
-                                await message.bot.send_photo(recipient_id, photo=media_val, caption=caption, parse_mode='html')
-                            elif media_type == "video":
-                                await message.bot.send_video(recipient_id, video=media_val, caption=caption, parse_mode='html')
-                            elif media_type == "voice":
-                                await message.bot.send_voice(recipient_id, voice=media_val, caption=caption, parse_mode='html')
-                            elif media_type == "video_note":
-                                await message.bot.send_message(recipient_id, caption, parse_mode='html')
-                                await message.bot.send_video_note(recipient_id, video_note=media_val)
-                            elif media_type == "document":
-                                await message.bot.send_document(recipient_id, document=media_val, caption=caption, parse_mode='html')
-                            elif media_type == "audio":
-                                await message.bot.send_audio(recipient_id, audio=media_val, caption=caption, parse_mode='html')
-                            elif media_type == "sticker":
-                                await message.bot.send_message(recipient_id, caption, parse_mode='html')
-                                await message.bot.send_sticker(recipient_id, sticker=media_val)
-                            elif media_type == "animation":
-                                await message.bot.send_animation(recipient_id, animation=media_val, caption=caption, parse_mode='html')
-                        except Exception as e:
-                            logger.error(f"Failed to send saved media: {e}")
-                        finally:
-                            try:
-                                os.remove(local_path)
-                            except Exception:
-                                pass
-                
-                settings = await UserSettingsDB.get_settings(recipient_id or USER_ID)
-                should_delete = settings.get("delete_reply", 1) == 1
-
-                if message.text == "." and should_delete:
-                    try:
-                        await message.bot.delete_business_messages(
-                            business_connection_id=message.business_connection_id,
-                            message_ids=[message.message_id]
-                        )
-                    except Exception as del_err:
-                        logger.error(f"Failed to delete reply message {message.message_id}: {del_err}")
+                            if media_type == "photo": await message.bot.send_photo(recipient_id, photo=media_val, caption=caption, parse_mode='html')
+                            elif media_type == "video": await message.bot.send_video(recipient_id, video=media_val, caption=caption, parse_mode='html')
+                        except Exception: pass
+                        finally: os.remove(local_path)
+            settings = await UserSettingsDB.get_settings(recipient_id or USER_ID)
+            if message.text == "." and settings.get("delete_reply", 1) == 1:
+                try: await message.bot.delete_business_messages(business_connection_id=message.business_connection_id, message_ids=[message.message_id])
+                except Exception: pass
         return
 
     if message.from_user and message.from_user.id == message.chat.id:
@@ -1403,50 +1171,17 @@ async def business_message(message: types.Message):
         file_id = None
         message_text = message.text or message.caption or ""
         
-        if message.photo:
-            media_type = "photo"
-            file_id = message.photo[0].file_id
-        elif message.video:
-            media_type = "video"
-            file_id = message.video.file_id
-        elif message.voice:
-            media_type = "voice"
-            file_id = message.voice.file_id
-        elif message.video_note:
-            media_type = "video_note"
-            file_id = message.video_note.file_id
-        elif message.document:
-            media_type = "document"
-            file_id = message.document.file_id
-        elif message.audio:
-            media_type = "audio"
-            file_id = message.audio.file_id
-        elif message.sticker:
-            media_type = "sticker"
-            file_id = message.sticker.file_id
-        elif message.animation:
-            media_type = "animation"
-            file_id = message.animation.file_id
+        if message.photo: media_type = "photo"; file_id = message.photo[-1].file_id
+        elif message.video: media_type = "video"; file_id = message.video.file_id
+        elif message.voice: media_type = "voice"; file_id = message.voice.file_id
             
-        if file_id:
-            asyncio.create_task(download_media(message.bot, file_id))
-
-        message_datetime_utc = message.date.replace(tzinfo=timezone.utc)
-        timestamp_iso = message_datetime_utc.isoformat()
-        
-        await MessageStore.add(
-            user_id=user_id,
-            message_id=message.message_id,
-            message_text=message_text,
-            timestamp=timestamp_iso,
-            media_type=media_type,
-            file_id=file_id
-        )
+        if file_id: asyncio.create_task(download_media(message.bot, file_id))
+        timestamp_iso = message.date.replace(tzinfo=timezone.utc).isoformat()
+        await MessageStore.add(user_id=user_id, message_id=message.message_id, message_text=message_text, timestamp=timestamp_iso, media_type=media_type, file_id=file_id)
 
 
 async def handle(request):
     return web.Response(text="Bot is running!")
-
 
 web_runner = None
 background_tasks = set()
@@ -1461,193 +1196,118 @@ async def start_web_server():
     port = int(os.environ.get("PORT", 8080))
     site = web.TCPSite(web_runner, "0.0.0.0", port)
     await site.start()
-    logger.info(f"Web server started on port {port}")
 
 
 async def stop_web_server():
     global web_runner
-    if web_runner:
-        try:
-            await web_runner.cleanup()
-        except Exception:
-            pass
+    if web_runner: await web_runner.cleanup()
 
 
 async def self_ping():
     import aiohttp
     external_url = os.environ.get("RENDER_EXTERNAL_URL")
-    if not external_url:
-        return
-        
+    if not external_url: return
     while True:
         try:
             await asyncio.sleep(5 * 60)
             async with aiohttp.ClientSession() as session:
-                async with session.get(external_url) as response:
-                    logger.info(f"Self-ping to {external_url}: {response.status}")
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Self-ping error: {e}")
+                async with session.get(external_url) as resp: logger.info(f"Self-ping: {resp.status}")
+        except asyncio.CancelledError: break
+        except Exception: pass
 
 
 async def on_startup(bot: Bot):
     global LAST_STARTUP_UPDATE_TIME
     LAST_STARTUP_UPDATE_TIME = asyncio.get_event_loop().time()
-    
     await MessageStore.create_db()
     await ConnectionsDB.create_table()
     await SystemStateDB.create_table()
     await UserSettingsDB.create_table()
 
-    task_digest = asyncio.create_task(process_startup_digest(bot))
-    background_tasks.add(task_digest)
-    task_digest.add_done_callback(background_tasks.discard)
+    for task_func in [process_startup_digest(bot), check_and_broadcast_changelog(bot), update_last_active(), monitor_memory(), cleanup_old_messages(), self_ping()]:
+        task = asyncio.create_task(task_func)
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
 
-    task_changelog = asyncio.create_task(check_and_broadcast_changelog(bot))
-    background_tasks.add(task_changelog)
-    task_changelog.add_done_callback(background_tasks.discard)
-
-    task_active = asyncio.create_task(update_last_active())
-    background_tasks.add(task_active)
-    task_active.add_done_callback(background_tasks.discard)
-
-    task_memory = asyncio.create_task(monitor_memory())
-    background_tasks.add(task_memory)
-    task_memory.add_done_callback(background_tasks.discard)
-    
-    task_cleanup = asyncio.create_task(cleanup_old_messages())
-    background_tasks.add(task_cleanup)
-    task_cleanup.add_done_callback(background_tasks.discard)
-
-    task_ping = asyncio.create_task(self_ping())
-    background_tasks.add(task_ping)
-    task_ping.add_done_callback(background_tasks.discard)
 
 async def on_shutdown(bot: Bot):
-    for task in background_tasks:
-        task.cancel()
-    if background_tasks:
-        await asyncio.gather(*background_tasks, return_exceptions=True)
-    
+    for task in background_tasks: task.cancel()
+    if background_tasks: await asyncio.gather(*background_tasks, return_exceptions=True)
     await stop_web_server()
-
     global db_pool
-    if db_pool:
-        db_pool.closeall()
-        db_pool = None
+    if db_pool: db_pool.closeall(); db_pool = None
 
 
-from aiogram.types import Update
-
-async def raw_update_middleware(handler, event: Update, data):
+async def raw_update_middleware(handler, event: types.Update, data):
     global LAST_STARTUP_UPDATE_TIME
-    if IS_BOOTING:
-        LAST_STARTUP_UPDATE_TIME = asyncio.get_event_loop().time()
+    if IS_BOOTING: LAST_STARTUP_UPDATE_TIME = asyncio.get_event_loop().time()
     return await handler(event, data)
+
+
+# =======================================================
+# КОД ДЛЯ ПИКМИ-ЮЗЕРБОТА (PYROGRAM)
+# =======================================================
+userbot = None
+if API_ID and API_HASH:
+    userbot = Client("my_account_session", api_id=API_ID, api_hash=API_HASH)
+
+    # 1. Хэндлер для быстрой триггер-команды в любом чате
+    @userbot.on_message(py_filters.me & py_filters.command("пикми", prefixes="."))
+    async def toggle_via_chat(_, message):
+        global PICKME_MODE
+        PICKME_MODE = not PICKME_MODE
+        status = "ВКЛЮЧЕН 🥺" if PICKME_MODE else "ВЫКЛЮЧЕН 😎"
+        
+        # Редактируем сообщение, чтобы показать статус, и через 2 секунды удаляем скрытно
+        await message.edit_text(f"<b>[Пикми-режим {status}]</b>")
+        await asyncio.sleep(2)
+        await message.delete()
+
+    # 2. Хэндлер для изменения твоих сообщений
+    @userbot.on_message(py_filters.me & py_filters.text)
+    async def pickme_transformer(_, message):
+        global PICKME_MODE
+        # Игнорируем управляющие команды
+        if message.text.startswith(".") or message.text.startswith("/"):
+            return
+
+        if PICKME_MODE:
+            original_text = message.text
+            new_text = f"{random.choice(PICKME_PREFIXES)}{original_text}{random.choice(PICKME_POSTFIXES)}"
+            try:
+                await message.edit_text(new_text)
+            except Exception as e:
+                logger.error(f"Ошибка изменения сообщения юзерботом: {e}")
 
 
 async def main() -> None:
     global db_pool
     if DATABASE_URL:
-        if not psycopg2_available:
-            raise RuntimeError("psycopg2 is not installed but DATABASE_URL is set.")
+        if not psycopg2_available: raise RuntimeError("psycopg2 is not installed.")
         db_pool = ThreadedConnectionPool(1, 20, dsn=DATABASE_URL)
 
-    # Задаем увеличенный таймаут для aiohttp сессии бота
-    session = AiohttpSession(timeout=ClientTimeout(total=120))
-    bot = Bot(token=TOKEN, session=session)
+    await start_web_server()
+
+    bot = Bot(token=TOKEN)
     dp = Dispatcher()
-    
-    @dp.message(lambda msg: msg.text and msg.text.lower() in ["/ping", "!пинг", "пинг"])
-    async def cmd_ping_private(message):
-        try:
-            await message.reply("🏓 **Понг!**\n\nБот на связи, скрипт работает исправно. ✅")
-        except Exception:
-            pass
-
-    @dp.business_message(lambda msg: msg.text and msg.text.lower() in ["/ping", "!пинг", "пинг"])
-    async def cmd_ping_business(message):
-        try:
-            await message.reply("🏓 **Понг!**\n\nБот-шпион активен в этом бизнес-чате. ✅")
-        except Exception:
-            pass
-   
-    @dp.callback_query(lambda c: c.data and c.data.startswith("orig_photo:"))
-    async def send_original_photo(callback_query):
-        data_parts = callback_query.data.split(":")
-        if len(data_parts) < 2 or not data_parts[1]:
-            try:
-                await callback_query.answer("Не удалось получить уникальный ID файла.", show_alert=True)
-            except Exception:
-                pass
-            return
-            
-        unique_id = data_parts[1]
-        try:
-            row = None
-            with db_session() as conn:
-                cursor = get_db_cursor(conn)
-                cursor.execute("SELECT file_id FROM messages WHERE file_id LIKE %s OR file_id = %s ORDER BY id DESC LIMIT 1", [f"%{unique_id}%", unique_id])
-                row = cursor.fetchone()
-            
-            if row and row['file_id']:
-                await callback_query.bot.send_photo(
-                    callback_query.from_user.id, 
-                    photo=row['file_id'], 
-                    caption="ℹ️ **Оригинальное качество с серверов Telegram**"
-                )
-                try:
-                    await callback_query.answer()
-                except Exception:
-                    pass
-            else:
-                try:
-                    await callback_query.answer("Оригинал еще не записался в базу данных или уже удален.", show_alert=True)
-                except Exception:
-                    pass
-        except Exception as e:
-            try:
-                await callback_query.answer(f"Ошибка загрузки оригинала: {e}", show_alert=True)
-            except Exception:
-                pass
-
     dp.update.outer_middleware(raw_update_middleware)
     dp.include_router(router)
-    
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     
     await bot.delete_webhook(drop_pending_updates=False)
-    
-       # === ИСПРАВЛЕННЫЙ БЛОК ДЛЯ САМОГО КОНЦА ФАЙЛА ===
-    
-    dp.update.outer_middleware(raw_update_middleware)
-    dp.include_router(router)
-    
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
-    
-    await bot.delete_webhook(drop_pending_updates=False)
-    
-    # Запускаем полинг с handle_as_tasks=True для полной асинхронности апдейтов
-    await dp.start_polling(
-        bot, 
-        allowed_updates=["message", "business_message", "edited_business_message", "deleted_business_messages"], 
-        handle_as_tasks=True
-    )
+
+    if userbot:
+        logger.info("🤖 Запуск тандема: Шпионский бот (Aiogram) + Пикми-Юзербот (Pyrogram)...")
+        await asyncio.gather(
+            dp.start_polling(bot),
+            userbot.start()
+        )
+        await asyncio.Event().wait()
+    else:
+        logger.warning("⚠️ API_ID и API_HASH не настроены. Пикми-Юзербот не будет запущен. Работает только логгер.")
+        await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
-    # Перед запуском подменяем таймаут сессии на обычное число, чтобы aiogram не ругался
-    from aiogram.client.session.aiohttp import AiohttpSession
-    
-    async def _fixed_main():
-        global bot
-        # Пересоздаем сессию с таймаутом в виде обычного числа (120 секунд)
-        session = AiohttpSession(timeout=120)
-        bot = Bot(token=TOKEN, session=session)
-        await main()
-
-    asyncio.run(_fixed_main())
-
+    asyncio.run(main())
